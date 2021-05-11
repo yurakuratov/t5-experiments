@@ -29,10 +29,21 @@ class HvdTorchNNTrainer(TorchTrainer):
     """DeepPavlov Horovod trainer.
 
     Is working, but does not support:
-        - stats syncing (check that all necessary stats are synchronized)
         - safe-exit with evaluation on ctrl+c
 
-    Only python -m deeppavlov train with Horovod was tested.
+    TODO:
+        - check that all necessary stats are synchronized (batches seen and etc)
+        - remove debug logging
+
+    python -m deeppavlov train/evaluate with Horovod was tested
+    the same config w & w/o horovodrun produces the same results (python -m evaluation)
+
+    e.g. commands:
+    with horovod
+        export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 \
+            python -m deeppavlov evaluate ./dp_configs/wmt/ende_hvd.json
+    w/o:
+        export CUDA_VISIBLE_DEVICES=0; python -m deeppavlov evaluate ./dp_configs/wmt/ende_hvd.json
     """
     def __init__(self, *args, **kwargs):
         logger.info(f'hvd size: {hvd.size()}')

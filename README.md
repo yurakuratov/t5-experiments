@@ -91,7 +91,9 @@ QQP is currently not available via tfds: https://github.com/tensorflow/datasets/
 to hot-fix this go to the source code of installed tfds `tensorflow_datasets/text/glue.py:215` and replace QQP data url with https://dl.fbaipublicfiles.com/glue/data/QQP.zip
 
 ### Fine-tuning on WMT
-Horovod+DeepPavlov:
+WMT configs could be found in `./dp_configs/wmt`
+
+Training with Horovod+DeepPavlov:
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/wmt/ende_hvd.json
 ```
