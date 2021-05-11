@@ -89,7 +89,7 @@
       "ROOT_PATH": "~/.deeppavlov",
       "DOWNLOADS_PATH": "{ROOT_PATH}/downloads",
       "PRETRAINED_PATH": "./runs/small_wiki_bs_128/",
-      "MODEL_PATH": "{PRETRAINED_PATH}/wmt_ende/bs_128",
+      "MODEL_PATH": "{PRETRAINED_PATH}/wmt/ende/bs_128",
       "TASK": "wmt_t2t_ende_v003"
     },
     "requirements": [
