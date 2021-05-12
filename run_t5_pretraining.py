@@ -62,6 +62,7 @@ parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                     help='number of batches to accumulate gradients for each worker; it multiplies total batch size.')
 parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
+parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
 
 
 def validate(iter):
@@ -82,6 +83,7 @@ if __name__ == '__main__':
     os.chdir(args.working_dir)
     if hvd.local_rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
+        logger.info(f'FP16: {args.fp16}')
 
     kwargs = {'pin_memory': True}
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
@@ -141,6 +143,7 @@ if __name__ == '__main__':
         logger.info(f'Using model class: {model_cls}')
     model = model_cls(config=t5config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
 
     init_iteration = 0
     if args.init_checkpoint:
@@ -190,16 +193,24 @@ if __name__ == '__main__':
             batch_loss = 0
             # iterations over sub-batches (for gradient accumulation)
             for j in range(0, len(batch['inputs']), args.batch_size):
-                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
-                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
-                                # todo: use decoder_attention mask!
-                                labels=batch['targets'][j: j + args.batch_size])
-                # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-                loss = outputs.loss / args.gradient_accumulation_steps
+                with torch.cuda.amp.autocast(enabled=args.fp16):
+                    outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
+                                    attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                    # todo: use decoder_attention mask!
+                                    labels=batch['targets'][j: j + args.batch_size])
+                    # divide loss on gradient_accumulation_steps to get average loss for sub-batches
+                    loss = outputs.loss / args.gradient_accumulation_steps
                 batch_loss += loss.detach().item()
-                loss.backward()
+                scaler.scale(loss).backward()
+
             losses += [batch_loss]
-            optimizer.step()
+            if args.fp16:
+                optimizer.synchronize()
+                with optimizer.skip_synchronize():
+                    scaler.step(optimizer)
+            else:
+                scaler.step(optimizer)
+            scaler.update()
 
             # logging / validation
             if i % args.log_interval == 0:
