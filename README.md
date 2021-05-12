@@ -97,3 +97,25 @@ Training with Horovod+DeepPavlov:
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/wmt/ende_hvd.json
 ```
+
+## FP16
+Install APEX https://github.com/NVIDIA/apex#quick-start
+```
+git clone https://github.com/NVIDIA/apex
+cd apex
+pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+```
+
+apex.amp is moved to torch.cuda.amp https://github.com/NVIDIA/apex/issues/818, but:
+
+speed: APEX O1 < torch.cuda.amp < APEX O2
+resources (unordered):
+ - https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html
+ - https://pytorch.org/docs/stable/notes/amp_examples.html
+ - https://spell.ml/blog/mixed-precision-training-with-pytorch-Xuk7YBEAACAASJam
+ - https://pytorch.org/blog/accelerating-training-on-nvidia-gpus-with-pytorch-automatic-mixed-precision/
+ - https://github.com/horovod/horovod/issues/1089
+ - https://github.com/NVIDIA/apex/issues/818
+
+### FP16 for t5 pretraining
+add `--fp16` and `--apex_opt_lvl O2` or `--apex_opt_lvl O1` (default).
