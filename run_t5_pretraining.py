@@ -6,12 +6,14 @@ from pathlib import Path
 import platform
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
+from apex import amp
 import horovod.torch as hvd
 import numpy as np
 import tensorflow.compat.v1 as tf
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
+
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import T5Config, T5Tokenizer
@@ -63,6 +65,7 @@ parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
 parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
 parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
+parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
 
 
 def validate(iter):
@@ -143,17 +146,6 @@ if __name__ == '__main__':
         logger.info(f'Using model class: {model_cls}')
     model = model_cls(config=t5config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
-
-    init_iteration = 0
-    if args.init_checkpoint:
-        # todo: use iteration number to restore position in dataset?
-        # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
-        checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        init_iteration = checkpoint.get('iteration', 0)
-        logger.info(f'Model was loaded from: {args.init_checkpoint}')
     model = model.cuda()
 
     # Horovod: broadcast parameters & optimizer state.
@@ -171,6 +163,20 @@ if __name__ == '__main__':
                                          gradient_predivide_factor=1.0,
                                          backward_passes_per_step=args.gradient_accumulation_steps,
                                          )
+    # Apex
+    model, optimizer = amp.initialize(model, optimizer, enabled=args.fp16, opt_level=args.apex_opt_lvl)
+
+    init_iteration = 0
+    if args.init_checkpoint:
+        # todo: use iteration number to restore position in dataset?
+        # todo: if there is checkpoint in model_path load model from the latest checkpoint (init_checkpoint is None)
+        checkpoint = torch.load(args.init_checkpoint)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if 'amp' in checkpoint and args.fp16:
+            amp.load_state_dict(checkpoint['amp'])
+        init_iteration = checkpoint.get('iteration', 0)
+        logger.info(f'Model was loaded from: {args.init_checkpoint}')
 
     # train loop
     i = init_iteration
@@ -193,24 +199,27 @@ if __name__ == '__main__':
             batch_loss = 0
             # iterations over sub-batches (for gradient accumulation)
             for j in range(0, len(batch['inputs']), args.batch_size):
-                with torch.cuda.amp.autocast(enabled=args.fp16):
-                    outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
-                                    attention_mask=batch['inputs_mask'][j: j + args.batch_size],
-                                    # todo: use decoder_attention mask!
-                                    labels=batch['targets'][j: j + args.batch_size])
-                    # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-                    loss = outputs.loss / args.gradient_accumulation_steps
+                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
+                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                # todo: use decoder_attention mask!
+                                labels=batch['targets'][j: j + args.batch_size])
+                if args.fp16 and args.apex_opt_lvl == 'O2':
+                    loss = outputs['loss']
+                else:
+                    loss = outputs.loss
+                # divide loss on gradient_accumulation_steps to get average loss for sub-batches
+                loss = loss / args.gradient_accumulation_steps
                 batch_loss += loss.detach().item()
-                scaler.scale(loss).backward()
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
 
             losses += [batch_loss]
             if args.fp16:
                 optimizer.synchronize()
                 with optimizer.skip_synchronize():
-                    scaler.step(optimizer)
+                    optimizer.step()
             else:
-                scaler.step(optimizer)
-            scaler.update()
+                optimizer.step()
 
             # logging / validation
             if i % args.log_interval == 0:
@@ -228,11 +237,14 @@ if __name__ == '__main__':
             # saving model
             if i % args.save_interval == 0 and hvd.local_rank() == 0:
                 save_path = f'{args.model_path}/model_{i}.pth'
-                torch.save({
+                to_save = {
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "iteration": i,
-                           }, save_path)
+                           }
+                if args.fp16:
+                    to_save['amp'] = amp.state_dict(),
+                torch.save(to_save, save_path)
                 logger.info(f'Model was saved to {save_path}')
 
             i += 1
