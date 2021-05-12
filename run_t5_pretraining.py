@@ -144,6 +144,8 @@ if __name__ == '__main__':
     model = model_cls(config=t5config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
+    if args.fp16:
+        model.forward = torch.cuda.amp.autocast()(model.forward)
 
     init_iteration = 0
     if args.init_checkpoint:
@@ -152,6 +154,8 @@ if __name__ == '__main__':
         checkpoint = torch.load(args.init_checkpoint, map_location='cpu')
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
         init_iteration = checkpoint.get('iteration', 0)
         logger.info(f'Model was loaded from: {args.init_checkpoint}')
     model = model.cuda()
@@ -193,13 +197,12 @@ if __name__ == '__main__':
             batch_loss = 0
             # iterations over sub-batches (for gradient accumulation)
             for j in range(0, len(batch['inputs']), args.batch_size):
-                with torch.cuda.amp.autocast(enabled=args.fp16):
-                    outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
-                                    attention_mask=batch['inputs_mask'][j: j + args.batch_size],
-                                    # todo: use decoder_attention mask!
-                                    labels=batch['targets'][j: j + args.batch_size])
-                    # divide loss on gradient_accumulation_steps to get average loss for sub-batches
-                    loss = outputs.loss / args.gradient_accumulation_steps
+                outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
+                                attention_mask=batch['inputs_mask'][j: j + args.batch_size],
+                                # todo: use decoder_attention mask!
+                                labels=batch['targets'][j: j + args.batch_size])
+                # divide loss on gradient_accumulation_steps to get average loss for sub-batches
+                loss = outputs.loss / args.gradient_accumulation_steps
                 batch_loss += loss.detach().item()
                 scaler.scale(loss).backward()
 
@@ -231,6 +234,7 @@ if __name__ == '__main__':
                 torch.save({
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
+                            "scaler_state_dict": scaler.state_dict(),
                             "iteration": i,
                            }, save_path)
                 logger.info(f'Model was saved to {save_path}')
