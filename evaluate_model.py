@@ -6,21 +6,22 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
-import dill
-dill.extend(False)
-import cloudpickle
-dill.extend(True)
-
-from horovod import run as hvd_run
 import pandas as pd
 import torch
 import typer
-
-from deeppavlov import evaluate_model, train_model
+from deeppavlov import evaluate_model, train_evaluate_model_from_config
+from horovod import run as hvd_run
 from tqdm import tqdm
-from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST
 
-from utils import expand_dp_path
+# fixes error with serializing evaluate_model/train_evaluate_model_from_config funcs during hvd call
+# should be before utils importing, seems like because of transformers imports 🤷‍♂️
+import dill
+dill.extend(False)
+import cloudpickle  # noqa: F401, E402
+dill.extend(True)
+
+from utils import expand_dp_path  # noqa: E402
+from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: E402
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -28,25 +29,30 @@ logger = logging.getLogger(__name__)
 
 pd.options.mode.chained_assignment = None
 
-app = typer.Typer()
 n_gpus = torch.cuda.device_count()
+app = typer.Typer()
 
 
-def hvd_dp_evaluate_model(config, check_metrics=False):
-    config = json.loads(json.dumps(config))
-    config['train']['class_name'] = 'dp_hvd_trainer:HvdTorchNNTrainer'
-    metrics = hvd_run(evaluate_model, args=(config,), np=n_gpus, use_gloo=True)
-    # check that metrics from all workers are equal
-    if check_metrics:
-        splits = list(metrics[0].keys())
-        metrics_names = metrics[0][splits[0]].keys()
-        for split in splits:
-            for name in metrics_names:
-                if len(set([m[split][name] for m in metrics])) > 1:
-                    print(metrics)
-                    logger.info('metrics should be equal for all hvd workers! stopping...')
-                    exit(1)
-    return metrics[0]
+def hvd_dp_run(config, fn=evaluate_model, check_metrics=False):
+    config = deepcopy(config)
+    if n_gpus > 1:
+        config['train']['class_name'] = 'dp_hvd_trainer:HvdTorchNNTrainer'
+        # hvd and gradient accumulation do not work together in DP currently
+        config['chainer']['pipe'][2]['sub_batch_size'] = None
+        metrics = hvd_run(fn, args=(config,), np=n_gpus, use_gloo=True)
+        # check that metrics from all workers are equal
+        if check_metrics:
+            splits = list(metrics[0].keys())
+            metrics_names = metrics[0][splits[0]].keys()
+            for split in splits:
+                for name in metrics_names:
+                    if len(set([m[split][name] for m in metrics])) > 1:
+                        print(metrics)
+                        logger.info('metrics should be equal for all hvd workers! stopping...')
+                        exit(1)
+        return metrics[0]
+    else:
+        return fn(config)
 
 
 def evaluate_checkpoint(pretrained_checkpoint: str,
@@ -103,28 +109,21 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
             config['train']['batch_size'] = train_batch_size
         if train_subbatch_size and n_gpus == 1:
             config['chainer']['pipe'][2]['sub_batch_size'] = train_subbatch_size
-        else:
-            # hvd and gradient acc do not work together in DP currently
-            config['chainer']['pipe'][2]['sub_batch_size'] = None
         # save config
         model_path = expand_dp_path(config['metadata']['variables']['MODEL_PATH'], config['metadata']['variables'])
         model_path.mkdir(parents=True, exist_ok=True)
         json.dump(config, (model_path / 'config.json').open('w'), indent=2)
-        _ = train_model(config)
+        metrics = hvd_dp_run(config, fn=train_evaluate_model_from_config, check_metrics=True)
     else:
         finetuned_model_config = json.load((finetuned_model_path.parent / 'config.json').open('r'))
         config['chainer']['pipe'][2] = deepcopy(finetuned_model_config['chainer']['pipe'][2])
         config['metadata']['variables']['MODEL_PATH'] = finetuned_model_config['metadata']['variables']['MODEL_PATH']
         config['chainer']['pipe'][2]['load_path'] = str('{MODEL_PATH}/' + str(finetuned_model_path.name.split('.')[0]))
-    config['train']['tensorboard_log_dir'] = None
-    config['train']['batch_size'] = eval_batch_size
-    config['chainer']['pipe'][2]['sub_batch_size'] = eval_batch_size
+        config['train']['tensorboard_log_dir'] = None
+        config['train']['batch_size'] = eval_batch_size
+        config['chainer']['pipe'][2]['sub_batch_size'] = eval_batch_size
+        metrics = hvd_dp_run(config, fn=evaluate_model, check_metrics=True)
 
-    if n_gpus > 1:
-        # hvd and gradient accumulation do not work together in DP currently
-        config['chainer']['pipe'][2]['sub_batch_size'] = None
-
-    metrics = hvd_dp_evaluate_model(config, check_metrics=True)
     load_path = expand_dp_path(config['chainer']['pipe'][2]['load_path'], config['metadata']['variables'])
 
     if not finetuned_model_path:
@@ -389,6 +388,6 @@ if __name__ == '__main__':
         --save-best
 
     python evaluate_model.py collect-metrics \
-        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth > report.txt
+        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth | less
     """
     app()
