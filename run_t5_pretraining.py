@@ -4,9 +4,9 @@ import logging
 import os
 from pathlib import Path
 import platform
+import importlib
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
-from apex import amp
 import horovod.torch as hvd
 import numpy as np
 import tensorflow.compat.v1 as tf
@@ -32,6 +32,9 @@ torch.set_num_threads(4)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# apex.amp
+amp = None
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_path', type=str, default='./model', help='path where to save model')
@@ -87,6 +90,12 @@ if __name__ == '__main__':
     if hvd.local_rank() == 0:
         logger.info(f'hvd size: {hvd.size()}')
         logger.info(f'FP16: {args.fp16}')
+
+    if args.fp16:
+        try:
+            amp = importlib.import_module('apex.amp')
+        except ImportError:
+            raise ImportError('Install NVIDIA APEX to use fp16 training! Check README.md for instructions.')
 
     kwargs = {'pin_memory': True}
     # When supported, use 'forkserver' to spawn dataloader workers instead of 'fork' to prevent
@@ -164,7 +173,8 @@ if __name__ == '__main__':
                                          backward_passes_per_step=args.gradient_accumulation_steps,
                                          )
     # Apex
-    model, optimizer = amp.initialize(model, optimizer, enabled=args.fp16, opt_level=args.apex_opt_lvl)
+    if args.fp16:
+        model, optimizer = amp.initialize(model, optimizer, enabled=args.fp16, opt_level=args.apex_opt_lvl)
 
     init_iteration = 0
     if args.init_checkpoint:
@@ -210,8 +220,11 @@ if __name__ == '__main__':
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = loss / args.gradient_accumulation_steps
                 batch_loss += loss.detach().item()
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
+                if args.fp16:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
 
             losses += [batch_loss]
             if args.fp16:
