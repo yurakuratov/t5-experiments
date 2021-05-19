@@ -8,19 +8,28 @@ import importlib
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
 import horovod.torch as hvd
+
 import numpy as np
 import tensorflow.compat.v1 as tf
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
-
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-import transformers
-from transformers import T5Config, T5Tokenizer
 
-from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor
-from utils import get_cls_by_name, get_git_hash_commit
+# if CUDA_VISIBLE_DEVICES is not set make all gpus visible
+if os.environ.get('CUDA_VISIBLE_DEVICES', None) is None:
+    os.environ['CUDA_VISIBLE_DEVICES'] = ','.join([str(i) for i in range(torch.cuda.device_count())])
+
+hvd.init()
+# set 1 gpu visible per process, should be before transformers import
+os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['CUDA_VISIBLE_DEVICES'].split(',')[hvd.local_rank()]
+
+import transformers  # noqa: E402
+from transformers import T5Config, T5Tokenizer  # noqa: E402
+
+from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor  # noqa: E402
+from utils import get_cls_by_name, get_git_hash_commit  # noqa: E402
 
 tf.config.set_visible_devices([], 'GPU')  # turn off GPUs for tf operations
 # limit cpu threads for tf
@@ -33,6 +42,7 @@ torch.set_num_threads(4)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 # apex.amp
 amp = None
@@ -90,8 +100,6 @@ if __name__ == '__main__':
     # run with horovod:
     # export CUDA_VISIBLE_DEVICES=0,1,2; horovodrun --gloo -np 3 python run_t5_pretraining.py
     args = parser.parse_args()
-    hvd.init()
-    torch.cuda.set_device(hvd.local_rank())
     # set current working dir
     # todo: maybe take path to run_t5_pretraining.py?
     args.working_dir = str(Path(args.working_dir).expanduser().absolute())
