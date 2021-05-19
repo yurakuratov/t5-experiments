@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import transformers
 from transformers import T5Config, T5Tokenizer
 
 from data_utils import T5PretrainingDataset, assert_vocabs, jsonl_preprocessor
@@ -59,7 +60,7 @@ parser.add_argument('--vocab', type=str, default='./vocabs/sentencepiece.model',
                     help='path to vocabulary file with sentencepiece model (default: ./vocabs/sentencepiece.model)')
 
 # training args
-parser.add_argument('--lr', type=float, default=5e-05, help='learning rate (default: 5e-05)')
+parser.add_argument('--lr', type=float, default=None, help='learning rate (default: None)')
 parser.add_argument('--batch_size', type=int, default=10, help='input batch size for training (default: 10)')
 parser.add_argument('--iters', type=int, default=100,
                     help='number of training steps (i.e., gradient updates) (default: 100).')
@@ -69,6 +70,14 @@ parser.add_argument('--fp16-allreduce', action='store_true', default=False,
                     help='use fp16 compression during allreduce')
 parser.add_argument('--fp16', action='store_true', default=False, help='use torch.amp for fp16 training')
 parser.add_argument('--apex_opt_lvl', type=str, default='O1', help='apex opt level, O1, O2. (default: O1)')
+parser.add_argument('--optimizer', type=str, default='AdamW', help='optimizer name: AdamW, Adafactor. (default: AdamW)')
+parser.add_argument('--weight_decay', type=float, default=0.0, help='optimizer weight decay (default: 0.0)')
+parser.add_argument('--scale_parameter', action='store_true', default=False,
+                    help='Adafactor scale_parameter (default: False)')
+parser.add_argument('--relative_step', action='store_true', default=False,
+                    help='Adafactor relative_step (default: False)')
+parser.add_argument('--warmup_init', action='store_true', default=False,
+                    help='Adafactor warmup_init (default: False)')
 
 
 def validate(iter):
@@ -154,7 +163,25 @@ if __name__ == '__main__':
     if hvd.local_rank() == 0:
         logger.info(f'Using model class: {model_cls}')
     model = model_cls(config=t5config)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+
+    if hasattr(torch.optim, args.optimizer):
+        optimizer_cls = getattr(torch.optim, args.optimizer)
+    elif hasattr(transformers.optimization, args.optimizer):
+        optimizer_cls = getattr(transformers.optimization, args.optimizer)
+    else:
+        raise RuntimeError(f'Optimizer {args.optimizer} was not found in torch.optim, transformers.optimization')
+    if optimizer_cls == transformers.optimization.Adafactor:
+        if args.lr is not None and not args.scale_parameter and not args.relative_step:
+            raise RuntimeError('To use a manual (external) learning rate schedule you should set '
+                               '`scale_parameter=False` and `relative_step=False`')
+
+        optimizer = optimizer_cls(model.parameters(), lr=args.lr,
+                                  scale_parameter=args.scale_parameter,
+                                  relative_step=args.relative_step,
+                                  warmup_init=args.warmup_init,
+                                  weight_decay=args.weight_decay)
+    else:
+        optimizer = optimizer_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     model = model.cuda()
 
     # Horovod: broadcast parameters & optimizer state.
@@ -217,6 +244,7 @@ if __name__ == '__main__':
                     loss = outputs['loss']
                 else:
                     loss = outputs.loss
+
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = loss / args.gradient_accumulation_steps
                 batch_loss += loss.detach().item()
@@ -224,6 +252,7 @@ if __name__ == '__main__':
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
                         # last sub-batch, call synchronize within amp.scale_loss scope
+                        # mb move to just above with optimizer.skip_synchronize()
                         if j == (len(batch['inputs']) // args.batch_size - 1) * args.batch_size:
                             optimizer.synchronize()
                 else:
