@@ -59,3 +59,43 @@ def load_experiment(path, t5_configs_path, checkpoint=None, check_commit=True):
     print(f'Model was loaded from: {checkpoint}')
     model.eval()
     return model, t5tokenizer
+
+def load_finetuning_model(pretraining_model, finetuning_model_config_path, checkpoint):
+    
+    cfg = json.load((Path(finetuning_model_config_path)).open('r'))
+    model_cls = get_cls_by_name(cfg['model_cls'])
+    t5_config = T5Config.from_json_file(Path(cfg['t5_config']))
+    model = model_cls(config=t5_config)
+    
+    
+    state_dict = torch.load(str(checkpoint), map_location='cpu')
+    pretrained_dict = state_dict["model_state_dict"]
+    model_dict = model.state_dict()
+    
+    '''
+    with open("./wm_state_dict.txt", "w") as f:
+        for k in model_dict.keys():
+            f.write(f"{str(k)}, {model_dict[k].size()}\n")
+    with open("./pretrained_state_dict.txt", "w") as f:
+        for k in pretrained_dict.keys(): 
+            f.write(f"{str(k)}, {pretrained_dict[k].size()}\n")
+    print(f"model_dict = {model.state_dict().keys()}")
+    '''
+    
+    pretrained_dict['decoder.wm_tok_type_embed_tokens.weight'] = model_dict['decoder.wm_tok_type_embed_tokens.weight']
+    pretrained_dict['wm_tok_type_embedding.weight'] = model_dict['wm_tok_type_embedding.weight']
+    
+    
+    pretrained_dict['lm_head.weight'] = torch.cat([pretrained_dict['lm_head.weight'], 
+                                                   model_dict['wm_tok_type_embedding.weight']],dim=0)
+   
+    # 2. overwrite entries in the existing state dict
+    model_dict.update(pretrained_dict) 
+    # 3. load the new state dict
+    model.load_state_dict(pretrained_dict)
+    
+   
+    print(f'Model was loaded from: {checkpoint}')
+    model.eval()
+    
+    return model

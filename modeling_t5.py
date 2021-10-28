@@ -43,6 +43,21 @@ from transformers.modeling_utils import PreTrainedModel, find_pruneable_heads_an
 from transformers.utils import logging
 from transformers.models.t5.configuration_t5 import T5Config
 
+# custom dataclass imports
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+from transformers.file_utils import ModelOutput
+##################################
+
+# beam search imports
+from typing import Any, Dict
+
+from transformers.file_utils import ModelOutput
+from transformers.generation_beam_search import BeamScorer
+from transformers.generation_logits_process import LogitsProcessorList
+##################################
+
+
 from utils import get_cls_by_name
 
 
@@ -452,7 +467,6 @@ class T5Attention(nn.Module):
 
             if mask is not None:
                 position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
-
         scores += position_bias
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(
             scores
@@ -753,13 +767,37 @@ class T5PreTrainedModel(PreTrainedModel):
         assert torch.all(shifted_input_ids >= 0).item(), "Verify that `shifted_input_ids` has only positive values"
 
         return shifted_input_ids
+    
+    def _preprocess_labels(self, input_ids, insert_token_id=None):
+        if insert_token_id is None:
+            insert_token_id = self.config.decoder_start_token_id
+        pad_token_id = self.config.pad_token_id
+
+        assert (
+            insert_token_id is not None
+        ), "self.model.config.decoder_start_token_id has to be defined. In T5 it is usually set to the pad_token_id. See T5 docs for more information"
+
+        # shift inputs to the right
+        
+        shifted_input_ids = input_ids.new_zeros(input_ids.shape)
+        shifted_input_ids = input_ids.clone()
+        
+        assert pad_token_id is not None, "self.model.config.pad_token_id has to be defined."
+        # replace possible -100 values in labels by `pad_token_id`
+        shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
+
+        assert torch.all(shifted_input_ids >= 0).item(), "Verify that `shifted_input_ids` has only positive values"
+
+        return shifted_input_ids
+
 
 
 class T5Stack(T5PreTrainedModel):
-    def __init__(self, config, embed_tokens=None, memory_tokens=None):
+    def __init__(self, config, embed_tokens=None, memory_tokens=None, wm_tok_type_embed_tokens=None):
         super().__init__(config)
 
         self.embed_tokens = embed_tokens
+        self.wm_tok_type_embed_tokens = wm_tok_type_embed_tokens
         self.memory_tokens = memory_tokens
         self.num_memory_tokens = config.num_memory_tokens if hasattr(config, 'num_memory_tokens') else 0
         self.is_decoder = config.is_decoder
@@ -780,14 +818,17 @@ class T5Stack(T5PreTrainedModel):
 
     def set_input_embeddings(self, new_embeddings):
         self.embed_tokens = new_embeddings
+    
 
     def forward(
         self,
         input_ids=None,
+        wm_tok_type_ids=None,
         attention_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         inputs_embeds=None,
+        wm_tok_type_embeds=None,
         head_mask=None,
         past_key_values=None,
         use_cache=None,
@@ -817,10 +858,18 @@ class T5Stack(T5PreTrainedModel):
         else:
             err_msg_prefix = "decoder_" if self.is_decoder else ""
             raise ValueError(f"You have to specify either {err_msg_prefix}inputs or {err_msg_prefix}inputs_embeds")
-
+        
+        if wm_tok_type_ids is not None:
+            wm_tok_type_ids = wm_tok_type_ids.view(-1, wm_tok_type_ids.size()[-1])
+        
         if inputs_embeds is None:
             assert self.embed_tokens is not None, "You have to initialize the model with valid token embeddings"
             inputs_embeds = self.embed_tokens(input_ids)
+            
+        if self.wm_tok_type_embed_tokens is not None:
+            if (wm_tok_type_embeds is None) and self.is_decoder:
+                wm_tok_type_embeds = self.wm_tok_type_embed_tokens(wm_tok_type_ids)
+
 
         batch_size, seq_length = input_shape
 
@@ -832,6 +881,7 @@ class T5Stack(T5PreTrainedModel):
                 attention_mask = F.pad(attention_mask, (self.num_memory_tokens, 0), value=1)
 
         # required mask seq length can be calculated via length of past
+        
         mask_seq_length = past_key_values[0][0].shape[2] + seq_length if past_key_values is not None else seq_length
 
         if use_cache is True:
@@ -840,7 +890,8 @@ class T5Stack(T5PreTrainedModel):
             )
 
         if attention_mask is None:
-            attention_mask = torch.ones(batch_size, mask_seq_length).to(inputs_embeds.device)
+            
+            attention_mask = torch.ones((batch_size, mask_seq_length)).to(inputs_embeds.device)
         if self.is_decoder and encoder_attention_mask is None and encoder_hidden_states is not None:
             encoder_seq_length = encoder_hidden_states.shape[1]
             encoder_attention_mask = torch.ones(
@@ -869,8 +920,11 @@ class T5Stack(T5PreTrainedModel):
         all_cross_attentions = () if (output_attentions and self.is_decoder) else None
         position_bias = None
         encoder_decoder_position_bias = None
-
-        hidden_states = self.dropout(inputs_embeds)
+        if wm_tok_type_embeds is not None:
+            dropout_inputs = inputs_embeds + wm_tok_type_embeds if self.is_decoder else inputs_embeds
+        else:
+            dropout_inputs = inputs_embeds
+        hidden_states = self.dropout(dropout_inputs)
 
         for i, (layer_module, past_key_value) in enumerate(zip(self.block, past_key_values)):
             if output_hidden_states:
@@ -1394,6 +1448,1563 @@ class T5ForConditionalGeneration(T5PreTrainedModel):
 
             reordered_decoder_past = reordered_decoder_past + (reordered_layer_past_states,)
         return reordered_decoder_past
+
+@dataclass
+class Seq2SeqWMLMOutput(ModelOutput):
+    """
+    Base class for working memory sequence-to-sequence language models outputs.
+
+    Args:
+        loss (:obj:`torch.FloatTensor` of shape :obj:`(1,)`, `optional`, returned when :obj:`labels` is provided):
+            Language modeling loss.
+        logits (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, config.vocab_size)`):
+            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+        past_key_values (:obj:`List[torch.FloatTensor]`, `optional`, returned when ``use_cache=True`` is passed or when ``config.use_cache=True``):
+            List of :obj:`torch.FloatTensor` of length :obj:`config.n_layers`, with each tensor of shape :obj:`(2,
+            batch_size, num_heads, sequence_length, embed_size_per_head)`).
+
+            Contains pre-computed hidden-states (key and values in the attention blocks) of the decoder that can be
+            used (see :obj:`past_key_values` input) to speed up sequential decoding.
+        decoder_hidden_states (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_hidden_states=True`` is passed or when ``config.output_hidden_states=True``):
+            Tuple of :obj:`torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer)
+            of shape :obj:`(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the decoder at the output of each layer plus the initial embedding outputs.
+        decoder_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or when ``config.output_attentions=True``):
+            Tuple of :obj:`torch.FloatTensor` (one for each layer) of shape :obj:`(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+
+            Attentions weights of the decoder, after the attention softmax, used to compute the weighted average in the
+            self-attention heads.
+        cross_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or when ``config.output_attentions=True``):
+            Tuple of :obj:`torch.FloatTensor` (one for each layer) of shape :obj:`(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+
+            Attentions weights of the decoder's cross-attention layer, after the attention softmax, used to compute the
+            weighted average in the cross-attention heads.
+        encoder_last_hidden_state (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
+            Sequence of hidden-states at the output of the last layer of the encoder of the model.
+        encoder_hidden_states (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_hidden_states=True`` is passed or when ``config.output_hidden_states=True``):
+            Tuple of :obj:`torch.FloatTensor` (one for the output of the embeddings + one for the output of each layer)
+            of shape :obj:`(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the encoder at the output of each layer plus the initial embedding outputs.
+        encoder_attentions (:obj:`tuple(torch.FloatTensor)`, `optional`, returned when ``output_attentions=True`` is passed or when ``config.output_attentions=True``):
+            Tuple of :obj:`torch.FloatTensor` (one for each layer) of shape :obj:`(batch_size, num_heads,
+            sequence_length, sequence_length)`.
+
+            Attentions weights of the encoder, after the attention softmax, used to compute the weighted average in the
+            self-attention heads.
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[List[torch.FloatTensor]] = None
+    decoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    decoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_last_hidden_state: Optional[torch.FloatTensor] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    token_type: Optional[torch.LongTensor] = None
+    
+    
+@add_start_docstrings("""T5 Model with a `language modeling` head on top and working memory in decoder. """, T5_START_DOCSTRING)
+class T5WMForConditionalGeneration(T5PreTrainedModel):
+    _keys_to_ignore_on_load_missing = [
+        r"encoder\.embed_tokens\.weight",
+        r"decoder\.embed_tokens\.weight",
+        r"lm_head\.weight",
+        r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
+    ]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model_dim = config.d_model
+        self.config_vocab_size = config.vocab_size
+
+        self.shared = nn.Embedding(config.vocab_size, config.d_model)
+        self.wm_tok_type_embedding = nn.Embedding(2, config.d_model)
+
+        encoder_config = copy.deepcopy(config)
+        encoder_config.use_cache = False
+        encoder_config.is_encoder_decoder = False
+        self.encoder = T5Stack(encoder_config, self.shared)
+        # T5Stack(config, embed_tokens=None, memory_tokens=None, wm_tok_type_embed_tokens=None)
+
+        decoder_config = copy.deepcopy(config)
+        decoder_config.is_decoder = True
+        decoder_config.is_encoder_decoder = False
+        decoder_config.num_layers = config.num_decoder_layers
+        self.decoder = T5Stack(decoder_config, embed_tokens=self.shared, wm_tok_type_embed_tokens=self.wm_tok_type_embedding)
+
+        
+        self.work_mem_size = config.work_mem_size
+        self.nucleus_p = config.nucleus_p
+        
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size+2, bias=False)
+        
+        print(f"init lm_head {self.lm_head}")
+        print(f"init vocab_size {config.vocab_size}")
+
+        self.init_weights()
+        
+        print(f"after init vocab_size {config.vocab_size}, self.lm_head = {self.lm_head}")
+            
+
+    def get_input_embeddings(self):
+        return self.shared
+    
+    def get_wmtt_embeddings(self):
+        return self.wm_tok_type_embedding
+
+    def set_input_embeddings(self, new_embeddings):
+        self.shared = new_embeddings
+        self.encoder.set_input_embeddings(new_embeddings)
+        self.decoder.set_input_embeddings(new_embeddings)
+
+    def get_output_embeddings(self):
+        #zz = nn.Linear(self.model_dim, self.config_vocab_size, bias=False)
+        #zz.weight = nn.Parameter(self.lm_head.weight[...,:-2,:].clone())
+        return self.lm_head #zz #
+
+    def get_encoder(self):
+        return self.encoder
+
+    def get_decoder(self):
+        return self.decoder
+    
+    def tie_weights(self):
+        """
+        Tie the weights between the input embeddings and the output embeddings.
+
+        If the :obj:`torchscript` flag is set in the configuration, can't handle parameter sharing so we are cloning
+        the weights instead.
+        """
+        print("\n\nDOING CUSTOM TIE WEIGHTS\n\n")
+        output_embeddings = self.get_output_embeddings()
+        if output_embeddings is not None and self.config.tie_word_embeddings:
+            self._tie_or_clone_weights(output_embeddings, self.get_input_embeddings(), self.get_wmtt_embeddings())
+
+        if self.config.is_encoder_decoder and self.config.tie_encoder_decoder:
+            if hasattr(self, self.base_model_prefix):
+                self = getattr(self, self.base_model_prefix)
+            self._tie_encoder_decoder_weights(self.encoder, self.decoder, self.base_model_prefix)
+
+    
+    def _tie_or_clone_weights(self, output_embeddings, input_embeddings, wmtt_embeddings):
+        """Tie or clone module weights depending of whether we are using TorchScript or not"""
+        print("\n\nDOING CUSTOM TIE OR CLONE WEIGHTS\n\n")
+        
+        if self.config.torchscript:
+            print(f"GENERATING POTENTIALLY WRONG LM_HEAD EMBEDDINGS")
+            output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
+        else:
+            output_embeddings.weight.data = torch.cat([input_embeddings.weight.data[:, :], wmtt_embeddings.weight.data[:, :]],dim=0)
+        if getattr(output_embeddings, "bias", None) is not None:
+            output_embeddings.bias.data = torch.nn.functional.pad(
+                output_embeddings.bias.data,
+                (
+                    0,
+                    output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0],
+                ),
+                "constant",
+                0,
+            )
+        
+        if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
+            output_embeddings.out_features = input_embeddings.num_embeddings + wmtt_embeddings.num_embeddings
+
+    
+    # taken from https://discuss.pytorch.org/t/a-fast-way-to-apply-a-function-across-an-axis/8378
+    # torch.cuda.LongTensor == int64
+    def batch_apply(self, func, M, dtype=torch.cuda.LongTensor):
+        unbinded = [torch.unbind(M_i, dim=0) for M_i in M]
+        tList = [func(m) for m in zip(*unbinded)]
+
+        if isinstance(tList[0], tuple):
+            tLists = list(zip(*tList))
+            res = tuple(torch.stack(tList, dim=0).type(dtype) for tList in tLists)
+        else:
+            res = torch.stack(tList, dim=0).type(dtype)
+        return res
+
+
+    
+    #nucleus sampling here
+    def nucleus_sampling(self, x):
+        logits = x[0] 
+        p = x[1] #0.9
+
+        # taken from https://github.com/huggingface/transformers/blob/0d00c08da0aaa03dc00e2b6dce9574aee3402967/src/transformers/generation_logits_process.py#L171
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        # Remove tokens with cumulative top_p above the threshold (token with 0 are kept)
+        sorted_indices_to_remove = cumulative_probs > p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        # scatter sorted tensors to original indexing
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        scores = logits.masked_fill(indices_to_remove, -float("Inf"))
+        probs = torch.nn.functional.softmax(scores, dim=-1)
+        _next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+        return _next_tokens
+
+
+    def sample_tokens(self, x):
+        preds = x[0]
+        token_type = x[1]
+        nucleus_p = x[2]
+        if token_type == 0:
+            return self.nucleus_sampling((preds, nucleus_p))
+        else:
+            return torch.argmax(preds, dim=-1)
+
+
+
+            
+            
+    @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        head_mask=None,
+        inputs_embeds=None,
+        decoder_inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_normalized_attentions=False,
+        output_hidden_states=None,
+        return_dict=None,
+        token_type=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[-100, 0, ...,
+            config.vocab_size - 1]`. All labels set to ``-100`` are ignored (masked), the loss is only computed for
+            labels in ``[0, ..., config.vocab_size]``
+
+        Returns:
+
+        Examples::
+
+            >>> from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
+            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small')
+
+            >>> input_ids = tokenizer('The <extra_id_0> walks in <extra_id_1> park', return_tensors='pt').input_ids
+            >>> labels = tokenizer('<extra_id_0> cute dog <extra_id_1> the <extra_id_2> </s>', return_tensors='pt').input_ids
+            >>> outputs = model(input_ids=input_ids, labels=labels)
+            >>> loss = outputs.loss
+            >>> logits = outputs.logits
+
+            >>> input_ids = tokenizer("summarize: studies have shown that owning a dog is good for you ", return_tensors="pt").input_ids  # Batch size 1
+            >>> outputs = model.generate(input_ids)
+        """
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        inference_flag = True if decoder_input_ids is not None else False
+        
+        if labels is not None:
+            unshifted_decoder_input_ids = self._preprocess_labels(labels)
+        
+        ##############################################################################################################
+        
+        if self.work_mem_size > 0:
+            if decoder_attention_mask is not None:
+                decoder_attention_mask = torch.cat([
+                    torch.ones((decoder_attention_mask.size()[0], self.work_mem_size),
+                               dtype=decoder_attention_mask.dtype).to(decoder_attention_mask.device),
+                    decoder_attention_mask
+                ], dim=-1)
+            
+            # Encode if needed (training, first prediction pass)
+            if encoder_outputs is None:
+                # Convert encoder inputs in embeddings if needed
+                encoder_outputs = self.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    inputs_embeds=inputs_embeds,
+                    head_mask=head_mask,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
+                encoder_outputs = BaseModelOutput(
+                    last_hidden_state=encoder_outputs[0],
+                    hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
+                    attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                )
+
+            hidden_states = encoder_outputs[0]
+
+            # decoder input ids appear when doing inference!!!!!!!!!!!!!
+            if decoder_input_ids is not None:
+                unshifted_decoder_input_ids = self._preprocess_labels(decoder_input_ids)
+                curr_decoder_input_ids = decoder_input_ids
+                if decoder_input_ids.size()[1] == 1 and token_type is None:
+                    # create token_type
+                    token_type = torch.ones_like(decoder_input_ids, dtype=torch.int64)
+                    curr_token_type = torch.ones_like(decoder_input_ids, dtype=torch.int64)
+            
+                 
+
+            if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+                # get decoder inputs from shifting lm labels to the right
+                #shift right means prepend start token and drop last token from labels
+                
+                decoder_input_ids = self._shift_right(labels)
+                curr_decoder_input_ids = decoder_input_ids[:,:1]
+                # create token_type
+                token_type = torch.ones_like(curr_decoder_input_ids, dtype=torch.int64)
+            
+                # fixed: decoder_attention_mask should also be shifted if labels are shifted
+                if decoder_attention_mask is not None:
+                    decoder_attention_mask = self._shift_right(decoder_attention_mask, insert_token_id=1)
+                    curr_decoder_attention_mask = decoder_attention_mask[:,:1]
+            
+            
+            
+            if decoder_inputs_embeds is not None:
+                curr_decoder_inputs_embeds = decoder_inputs_embeds[:,:1]
+            else:
+                curr_decoder_inputs_embeds = None #self.decoder.wm_tok_type_embed_tokens(curr_decoder_input_ids)
+            
+            
+
+            # If decoding with past key value states, only the last tokens
+            # should be given as an input
+            if past_key_values is not None:
+                assert labels is None, "Decoder should not use cached key value states when training."
+                if curr_decoder_input_ids is not None:
+                    curr_decoder_input_ids = curr_decoder_input_ids[:, -1:]
+                if curr_decoder_inputs_embeds is not None:
+                    curr_decoder_inputs_embeds = curr_decoder_inputs_embeds[:, -1:]
+                if token_type is not None:
+                    curr_token_type = token_type[:, -1:]
+            else:
+                curr_token_type = token_type
+
+            
+            
+
+            if inference_flag:
+                # print(f"inference curr_decoder_input_ids = {curr_decoder_input_ids.size()}")
+                decoder_outputs = self.decoder(
+                    input_ids=curr_decoder_input_ids,
+                    wm_tok_type_ids=curr_token_type,
+                    attention_mask=decoder_attention_mask,
+                    inputs_embeds=curr_decoder_inputs_embeds,
+                    past_key_values=past_key_values,
+                    encoder_hidden_states=hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    head_mask=head_mask,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+
+                sequence_output = decoder_outputs[0]
+
+                if self.config.tie_word_embeddings:
+                    # Rescale output before projecting on vocab
+                    # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                    sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+                logits = self.lm_head(sequence_output) # lm_logits
+
+
+                token_id_preds = logits[..., :-2].contiguous() # lm_logits
+                pred_wm_tok_type_logits = logits[..., -1:, -2:].contiguous()
+                predicted_token_type = torch.argmax(pred_wm_tok_type_logits, dim=-1).type(torch.cuda.LongTensor)
+                token_type = torch.cat((token_type, predicted_token_type), dim=-1) # wm_tok_type_ids
+                    
+                # check if we agree with work_mem_size bounds
+                def bound_wm(x):
+                    token_type_sample = x[0] 
+                    
+                    if torch.gt(
+                        torch.sub(
+                            torch.tensor([token_type_sample[1:].size()[0]], dtype=torch.int64).to('cuda'),
+                            torch.sum(token_type_sample[1:])
+                        ),
+                        torch.tensor(self.work_mem_size).to('cuda')
+                    ):
+                        token_type_sample = torch.cat([token_type_sample[:-1], torch.tensor([1],dtype=torch.int64).to('cuda')], dim=0)
+                    return token_type_sample
+
+                token_type = self.batch_apply(bound_wm, M=[token_type], dtype=torch.cuda.LongTensor)
+                #############################################
+                
+               
+                loss = None
+                if not return_dict:
+                    output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
+                    return output
+
+                return Seq2SeqWMLMOutput(
+                    loss=loss,
+                    logits=token_id_preds,
+                    past_key_values=decoder_outputs.past_key_values,
+                    decoder_hidden_states=decoder_outputs.hidden_states,
+                    decoder_attentions=decoder_outputs.attentions,
+                    cross_attentions=decoder_outputs.cross_attentions,
+                    encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+                    encoder_hidden_states=encoder_outputs.hidden_states,
+                    encoder_attentions=encoder_outputs.attentions,
+                    token_type=token_type,
+                )
+
+
+
+            else:
+                full_memory_batch = torch.full((curr_decoder_input_ids.size()[0],), 0, dtype=torch.bool).to('cuda')
+                while torch.equal(torch.all(full_memory_batch), torch.tensor(False).to('cuda')) and (curr_decoder_input_ids.size()[1] <= decoder_input_ids.size()[1] + self.work_mem_size - 1):
+                #while curr_decoder_input_ids.size()[1] <= decoder_input_ids.size()[1] + self.work_mem_size:
+                    #print(f"decoder curr_decoder_input_ids = {curr_decoder_input_ids.size()}")
+                
+                    '''
+                    About decoder mask:
+                    # it's wrong because mask generated from data is shorter than we need for wm forward pass, so just don't use decoder mask when doing wm or recreate your own mask at each step. The usage of input decoder mask is turned off in dp.py line 331
+                    if decoder_attention_mask is not None:
+                        curr_decoder_attention_mask = decoder_attention_mask[:,:curr_decoder_input_ids.size()[1]]
+                    else:
+                        curr_decoder_attention_mask = None
+                    
+                    '''
+                    
+                    # Decode
+                    
+                    decoder_outputs = self.decoder(
+                        input_ids=curr_decoder_input_ids,
+                        wm_tok_type_ids=token_type,
+                        attention_mask=curr_decoder_attention_mask,
+                        inputs_embeds=curr_decoder_inputs_embeds, #None,
+                        past_key_values=past_key_values,
+                        encoder_hidden_states=hidden_states,
+                        encoder_attention_mask=attention_mask,
+                        head_mask=head_mask,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                        output_normalized_attentions=output_normalized_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                    )
+
+                    sequence_output = decoder_outputs[0]
+
+                    if self.config.tie_word_embeddings:
+                        # Rescale output before projecting on vocab
+                        # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                        sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+                    logits = self.lm_head(sequence_output) # lm_logits
+
+
+                    token_id_preds = logits[..., :-2].contiguous() # lm_logits
+                    pred_wm_tok_type_logits = logits[..., -1:, -2:].contiguous()
+                    predicted_token_type = torch.argmax(pred_wm_tok_type_logits, dim=-1).type(torch.cuda.LongTensor)
+
+                    token_type = torch.cat((token_type, predicted_token_type), dim=-1) # wm_tok_type_ids
+
+                    predicted_id = self.batch_apply(self.sample_tokens, 
+                                         M=[token_id_preds[...,-1:,:],
+                                            predicted_token_type,
+                                            torch.ones(token_id_preds.size()[0]).to('cuda') * self.nucleus_p
+                                           ],
+                                         dtype=torch.cuda.LongTensor)
+
+
+                    #insert teacher forcing here
+                    def sample_teacher_forcing(x):
+                        predicted_id_sample = x[0]
+                        token_type_sample = x[1] 
+                        tar_inp_sample = x[2] 
+                        tar_real_sample = x[3]
+
+                        idx = torch.sum(token_type_sample[1:-1])
+
+                        if torch.gt(
+                            torch.sub(
+                                torch.tensor([token_type_sample[1:].size()[0]], dtype=torch.int64).to('cuda'),
+                                torch.sum(token_type_sample[1:])
+                            ),
+                            torch.tensor(self.work_mem_size).to('cuda')
+                        ):
+                            token_type_sample = torch.cat([token_type_sample[:-1], torch.tensor([1],dtype=torch.int64).to('cuda')], dim=0)
+
+                        if torch.logical_and(torch.tensor(torch.equal(token_type_sample[-1], torch.tensor(1).to('cuda'))).to('cuda'),
+                                             torch.lt(idx.type(torch.cuda.IntTensor),
+                                                      tar_real_sample.size()[0]
+                                                     )
+                                            ):
+                            tar_inp_sample = torch.cat([tar_inp_sample, torch.tensor([max(0, tar_real_sample[idx])]).to('cuda')], 0)
+                        else:
+                            tar_inp_sample = torch.cat([tar_inp_sample, max(torch.tensor([0]).to('cuda'),predicted_id_sample)], 0)
+
+                        return tar_inp_sample, token_type_sample
+
+                    curr_decoder_input_ids, token_type = self.batch_apply(sample_teacher_forcing,
+                                                       M=[predicted_id, token_type, 
+                                                          curr_decoder_input_ids, unshifted_decoder_input_ids
+                                                         ],
+                                                       dtype=torch.cuda.LongTensor)
+                    
+                        
+                      
+                    def sample_concat_tails(x):
+                        token_type_sample = x[0] 
+                        tar_inp_sample = x[1] 
+                        tar_real_sample = x[2]
+                        #tar_inp starts from the beginning of tar
+                        #token_type sample contains currently predicted token type
+                        ##seq_token_index = tf.math.reduce_sum(token_type_sample[:-1])
+                        #we also take care of current number of seq tokens in token_type_sample:
+                        #  if the number of seq tokens(except start)(which gives index of tar_real element to concatenate)
+                        #  is less than len of tar_real then ok
+                        #  else just return predicted_id_sample
+
+                        #idx discards mem token types and start token type
+                        idx = torch.sum(token_type_sample[1:])
+                        #if tf.shape(token_type_sample[DEC_MEM_SIZE+1:])[0] - tf.math.reduce_sum(token_type_sample[DEC_MEM_SIZE+1:]) > MEM_TOKENS_NUM:
+                        #token_type_sample = tf.concat([token_type_sample[:-1], tf.constant([1],dtype=tf.int64)],0)
+                        token_type_sample = torch.cat([token_type_sample,
+                                                       torch.ones(tar_real_sample.size()[0] + \
+                                                                  torch.tensor(self.work_mem_size).to('cuda') - \
+                                                                  token_type_sample.size()[0],dtype=torch.int64).to('cuda')
+                                                      ], dim=0)
+                        tar_inp_sample = torch.cat([tar_inp_sample, tar_real_sample[idx:-1]],0)
+                        return tar_inp_sample, token_type_sample
+
+                    
+
+                    full_memory_batch = torch.tensor([
+                        torch.equal(torch.count_nonzero(torch.tensor(1).to('cuda') - token_type, dim=-1),
+                                    torch.full((token_type.size()[0],), self.work_mem_size, dtype=torch.int64).to('cuda')
+                                   )]).to('cuda')
+                    if torch.all(full_memory_batch) == True:
+                        curr_decoder_input_ids, token_type = self.batch_apply(sample_concat_tails,
+                                                           M=[token_type,
+                                                              curr_decoder_input_ids,
+                                                              unshifted_decoder_input_ids
+                                                             ],
+                                                           dtype=torch.cuda.LongTensor)
+                    
+                    if decoder_inputs_embeds is not None:
+                        curr_decoder_inputs_embeds = decoder_inputs_embeds[:, :curr_decoder_input_ids.size()[1]]
+                    else:
+                        curr_decoder_inputs_embeds = None
+                        
+                    if decoder_attention_mask is not None:
+                        curr_decoder_attention_mask = decoder_attention_mask[:,:curr_decoder_input_ids.size()[1]]
+                    else:
+                        curr_decoder_attention_mask = None
+                    
+
+                       
+                    
+                # print(f"self.lm_head = {self.lm_head}, logits = {logits.size()}")
+                #'''
+                #for last pass don't use past_kv because we enlarged decoder input seq len with seq tails at once 
+                
+                decoder_outputs = self.decoder(
+                    input_ids=curr_decoder_input_ids,
+                    wm_tok_type_ids=token_type,
+                    attention_mask=curr_decoder_attention_mask,
+                    inputs_embeds=curr_decoder_inputs_embeds,
+                    past_key_values=past_key_values,
+                    encoder_hidden_states=hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    head_mask=head_mask,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+
+                sequence_output = decoder_outputs[0]
+
+                if self.config.tie_word_embeddings:
+                    # Rescale output before projecting on vocab
+                    # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                    sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+                logits = self.lm_head(sequence_output) # lm_logits
+
+
+                token_id_preds = logits[..., :-2].contiguous() # lm_logits
+                pred_wm_tok_type_logits = logits[..., -1:, -2:].contiguous()
+                predicted_token_type = torch.argmax(pred_wm_tok_type_logits, dim=-1).type(torch.cuda.LongTensor)
+
+                token_type = torch.cat((token_type, predicted_token_type), dim=-1) # wm_tok_type_ids
+                
+                predicted_id = self.batch_apply(self.sample_tokens, 
+                                     M=[token_id_preds[...,-1:,:],
+                                        predicted_token_type,
+                                        torch.ones(token_id_preds.size()[0]).to('cuda') * self.nucleus_p
+                                       ],
+                                     dtype=torch.cuda.LongTensor)
+
+
+                # do teacher forcing to ensure that token_type meets wm boundaries of 10 tokens
+                _, token_type = self.batch_apply(sample_teacher_forcing,
+                                                   M=[predicted_id, token_type, 
+                                                      curr_decoder_input_ids, unshifted_decoder_input_ids
+                                                     ],
+                                                   dtype=torch.cuda.LongTensor)
+                
+                
+                #'''
+                                                                   
+                def filter_sample_seq_tokens(x):
+                    #here logits and token type are for tokens starting the first after the start token (very first mem tokens and start are discarded)
+                    predicted_logits_sample = x[0]
+                    token_type_sample = x[1]
+                    tar_real = x[2]
+                    tar_seq_len = tar_real.size()[0]
+                    curr_token_logits = torch.masked_select(predicted_logits_sample, torch.gt(token_type_sample, 0).unsqueeze(0).transpose(0,1).repeat(1,predicted_logits_sample.size()[1])).view(-1, predicted_logits_sample.size()[1])[:tar_seq_len,:]
+                    end_token_logits = torch.cat([torch.zeros((tar_seq_len - curr_token_logits.size()[0],
+                                                         1),
+                                                         dtype=torch.float32).to('cuda'),
+                                                torch.ones((tar_seq_len - curr_token_logits.size()[0], 
+                                                         curr_token_logits.size()[1]-1),
+                                                        dtype=torch.float32).to('cuda')
+                                               ],
+                                               -1)
+                    return torch.cat([curr_token_logits,
+                                    end_token_logits
+                                   ], 0)
+
+
+                seq_predictions = self.batch_apply(filter_sample_seq_tokens,
+                                        M=[token_id_preds, token_type[...,1:], 
+                                           unshifted_decoder_input_ids
+                                          ],
+                                        dtype=torch.cuda.FloatTensor
+                                       )
+                # print(f"seq_predictions = {seq_predictions.size()}")
+                lm_logits = seq_predictions
+
+        
+        else:
+            ####################################################################################################### 
+            
+
+            ##########!!!!!!!!!!!!!!!!!!!!!!!!!!!!!#################
+            #here we need a loop to generate all the mem autoregressively and then one last pass to generate the rest of the batch sequences
+
+            token_type=None
+            # Encode if needed (training, first prediction pass)
+            if encoder_outputs is None:
+                # Convert encoder inputs in embeddings if needed
+                encoder_outputs = self.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    inputs_embeds=inputs_embeds,
+                    head_mask=head_mask,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
+                encoder_outputs = BaseModelOutput(
+                    last_hidden_state=encoder_outputs[0],
+                    hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
+                    attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                )
+
+            hidden_states = encoder_outputs[0]
+
+            if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+                # get decoder inputs from shifting lm labels to the right
+                decoder_input_ids = self._shift_right(labels)
+                # fixed: decoder_attention_mask should also be shifted if labels are shifted
+                if decoder_attention_mask is not None:
+                    decoder_attention_mask = self._shift_right(decoder_attention_mask, insert_token_id=1)
+
+            # If decoding with past key value states, only the last tokens
+            # should be given as an input
+            if past_key_values is not None:
+                assert labels is None, "Decoder should not use cached key value states when training."
+                if decoder_input_ids is not None:
+                    decoder_input_ids = decoder_input_ids[:, -1:]
+                if decoder_inputs_embeds is not None:
+                    decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
+
+            # Decode
+            decoder_outputs = self.decoder(
+                input_ids=decoder_input_ids,
+                wm_tok_type_ids=token_type,
+                attention_mask=decoder_attention_mask,
+                inputs_embeds=decoder_inputs_embeds,
+                past_key_values=past_key_values,
+                encoder_hidden_states=hidden_states,
+                encoder_attention_mask=attention_mask,
+                head_mask=head_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_normalized_attentions=output_normalized_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+            sequence_output = decoder_outputs[0]
+
+            if self.config.tie_word_embeddings:
+                # Rescale output before projecting on vocab
+                # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+            lm_logits = self.lm_head(sequence_output)
+
+
+
+        
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
+            # print(f"lm_logits = {lm_logits.size()}, labels.view(-1) = {labels.view(-1).size()}")
+            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
+            # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
+
+        if not return_dict:
+            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
+            return ((loss,) + output) if loss is not None else output
+
+        return Seq2SeqLMOutput(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
+
+    def prepare_inputs_for_generation(
+        self, input_ids, past=None, attention_mask=None, use_cache=None, encoder_outputs=None, token_type=None, **kwargs
+    ):
+
+        # cut decoder_input_ids if past is used
+        if past is not None:
+            input_ids = input_ids[:, -1:]
+
+        return {
+            "decoder_input_ids": input_ids,
+            "past_key_values": past,
+            "encoder_outputs": encoder_outputs,
+            "attention_mask": attention_mask,
+            "use_cache": use_cache,
+            "token_type": token_type,
+        }
+    
+    @staticmethod
+    def _update_wm_model_kwargs_for_generation(
+        outputs: ModelOutput, model_kwargs: Dict[str, Any], is_encoder_decoder: bool = False
+    ) -> Dict[str, Any]:
+        
+        if "token_type" in outputs:
+            model_kwargs["token_type"] = outputs.token_type
+        
+        # update past
+        if "past_key_values" in outputs:
+            model_kwargs["past"] = outputs.past_key_values
+        elif "mems" in outputs:
+            model_kwargs["past"] = outputs.mems
+        elif "past_buckets_states" in outputs:
+            model_kwargs["past"] = outputs.past_buckets_states
+        else:
+            model_kwargs["past"] = None
+
+        # update token_type_ids with last value
+        if "token_type_ids" in model_kwargs:
+            token_type_ids = model_kwargs["token_type_ids"]
+            model_kwargs["token_type_ids"] = torch.cat([token_type_ids, token_type_ids[:, -1].unsqueeze(-1)], dim=-1)
+
+        # update attention mask
+        if not is_encoder_decoder:
+            if "attention_mask" in model_kwargs:
+                attention_mask = model_kwargs["attention_mask"]
+                model_kwargs["attention_mask"] = torch.cat(
+                    [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
+                )
+
+        return model_kwargs
+    
+    
+    def beam_search(
+        self,
+        input_ids: torch.LongTensor,
+        beam_scorer: BeamScorer,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        **model_kwargs
+    ):
+        r"""
+        Generates sequences for models with a language modeling head using beam search decoding.
+
+        Parameters:
+
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
+                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            beam_scorer (:obj:`BeamScorer`):
+                An derived instance of :class:`~transformers.BeamScorer` that defines how beam hypotheses are
+                constructed, stored and sorted during generation. For more information, the documentation of
+                :class:`~transformers.BeamScorer` should be read.
+            logits_processor (:obj:`LogitsProcessorList`, `optional`):
+                An instance of :class:`~transformers.LogitsProcessorList`. List of instances of class derived from
+                :class:`~transformers.LogitsProcessor` used to modify the prediction scores of the language modeling
+                head applied at each generation step.
+            max_length (:obj:`int`, `optional`, defaults to 20):
+                The maximum length of the sequence to be generated.
+            pad_token_id (:obj:`int`, `optional`):
+                The id of the `padding` token.
+            eos_token_id (:obj:`int`, `optional`):
+                The id of the `end-of-sequence` token.
+            model_kwargs:
+                Additional model specific kwargs will be forwarded to the :obj:`forward` function of the model. If
+                model is an encoder-decoder model the kwargs should include :obj:`encoder_outputs`.
+
+        Return:
+            :obj:`torch.LongTensor` of shape :obj:`(batch_size * num_return_sequences, sequence_length)`: The generated
+            sequences. The second dimension (sequence_length) is either equal to :obj:`max_length` or shorter if all
+            batches finished early due to the :obj:`eos_token_id`.
+
+        Examples::
+
+            >>> from transformers import (
+            ...    AutoTokenizer,
+            ...    AutoModelForSeq2SeqLM,
+            ...    LogitsProcessorList,
+            ...    MinLengthLogitsProcessor,
+            ...    BeamSearchScorer,
+            ... )
+            >>> import torch
+
+            >>> tokenizer = AutoTokenizer.from_pretrained("t5-base")
+            >>> model = AutoModelForSeq2SeqLM.from_pretrained("t5-base")
+
+            >>> encoder_input_str = "translate English to German: How old are you?"
+            >>> encoder_input_ids = tokenizer(encoder_input_str, return_tensors="pt").input_ids
+
+
+            >>> # lets run beam search using 3 beams
+            >>> num_beams = 3
+            >>> # define decoder start token ids
+            >>> input_ids = torch.ones((num_beams, 1), device=model.device, dtype=torch.long)
+            >>> input_ids = input_ids * model.config.decoder_start_token_id
+
+            >>> # add encoder_outputs to model keyword arguments
+            >>> model_kwargs = {
+            ...     "encoder_outputs": model.get_encoder()(encoder_input_ids.repeat_interleave(num_beams, dim=0), return_dict=True)
+            ... }
+
+            >>> # instantiate beam scorer
+            >>> beam_scorer = BeamSearchScorer(
+            ...     batch_size=1,
+            ...     max_length=model.config.max_length,
+            ...     num_beams=num_beams,
+            ...     device=model.device,
+            ... )
+
+            >>> # instantiate logits processors
+            >>> logits_processor = LogitsProcessorList([
+            ...     MinLengthLogitsProcessor(5, eos_token_id=model.config.eos_token_id),
+            ... ])
+
+            >>> outputs = model.beam_search(input_ids, beam_scorer, logits_processor=logits_processor, **model_kwargs)
+
+            >>> print("Generated:", tokenizer.batch_decode(outputs, skip_special_tokens=True))
+        """
+        
+        # init values
+        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
+        max_length = max_length if max_length is not None else self.config.max_length
+        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+
+        batch_size = len(beam_scorer._beam_hyps)
+        num_beams = beam_scorer.num_beams
+
+        batch_beam_size, cur_len = input_ids.shape
+
+        assert (
+            num_beams * batch_size == batch_beam_size
+        ), "Batch dimension of `input_ids` should be {num_beams * batch_size}, but is {batch_beam_size}."
+
+        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
+        beam_scores[:, 1:] = -1e9
+        beam_scores = beam_scores.view((batch_size * num_beams,))
+        
+        if model_kwargs.get("token_type", 0) == 0:
+            model_kwargs["token_type"] = None
+            
+        while cur_len < max_length:
+            # input ids - a tensor of decoder input tokens batch
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            outputs = self(**model_inputs, return_dict=True)
+            next_token_logits = outputs.logits[:, -1, :]
+            
+            # adjust tokens for Bart, *e.g.*
+            next_token_logits = self.adjust_logits_during_generation(
+                next_token_logits, cur_len=cur_len, max_length=max_length
+            )
+                
+            next_token_scores = F.log_softmax(next_token_logits, dim=-1)  # (batch_size * num_beams, vocab_size)
+
+            next_token_scores = logits_processor(input_ids, next_token_scores)
+            next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
+            # reshape for beam search
+            vocab_size = next_token_scores.shape[-1]
+            next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
+
+            next_token_scores, next_tokens = torch.topk(
+                next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
+            )
+
+            next_indices = next_tokens // vocab_size
+            next_tokens = next_tokens % vocab_size
+
+            # stateless
+            beam_outputs = beam_scorer.process(
+                input_ids,
+                next_token_scores,
+                next_tokens,
+                next_indices,
+                pad_token_id=pad_token_id,
+                eos_token_id=eos_token_id,
+            )
+            beam_scores = beam_outputs["next_beam_scores"]
+            beam_next_tokens = beam_outputs["next_beam_tokens"]
+            beam_idx = beam_outputs["next_beam_indices"]
+            
+            
+            
+            # check if current sample token type is wm then do sampling for corresponding logits vector else remain beam searched token untouched
+            def sample_or_beam_search(x):
+                preds = x[0]
+                token_type = x[1]
+                nucleus_p = x[2]
+                beam_next_tokens = x[3]
+                if token_type == 0:
+                    return self.nucleus_sampling((preds, nucleus_p))
+                else:
+                    return beam_next_tokens
+            
+            
+            tar_beam_and_nucleus_wm = self.batch_apply(sample_or_beam_search, 
+                                 M=[outputs.logits[...,-1:,:],
+                                    outputs.token_type[...,-1:],
+                                    torch.ones(outputs.logits.size()[0]).to('cuda') * self.nucleus_p,
+                                    beam_next_tokens.unsqueeze(-1)
+                                   ],
+                                 dtype=torch.cuda.LongTensor)
+            
+            ###########################################
+            # when getting input_ids[beam_idx, :] we reorder samples inside input_ids (possibly with repetitions)
+            # so token types should be reoredered in the same way. Analogously, past_kvs are reordered with _reorder_cache
+            input_ids = torch.cat([input_ids[beam_idx, :], 
+                                   tar_beam_and_nucleus_wm # beam_next_tokens.unsqueeze(-1)
+                                  ], dim=-1)
+            cur_len = cur_len + 1
+            
+            model_kwargs = self._update_wm_model_kwargs_for_generation(outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder)
+            # actualize token_types
+            if model_kwargs["token_type"] is not None:
+                model_kwargs["token_type"] = model_kwargs["token_type"][beam_idx, :]
+            
+            if model_kwargs["past"] is not None:
+                model_kwargs["past"] = self._reorder_cache(model_kwargs["past"], beam_idx)
+            if beam_scorer.is_done:
+                break
+                
+        
+        #filter out wm tokens and cut beam scorer max length
+        beam_scorer.max_length -= self.work_mem_size
+        # input_ids, outputs.token_type
+        
+        def filter_sample_beam_tokens(x):
+            #here logits and token type are for tokens starting the first after the start token (very first mem tokens and start are discarded)
+            predicted_tokens_sample = x[0]
+            token_type_sample = x[1]
+            tar_seq_len = x[2]
+            filtered = torch.masked_select(predicted_tokens_sample, torch.gt(token_type_sample, 0))[:tar_seq_len]
+            return torch.cat([filtered, torch.zeros(tar_seq_len-filtered.size()[0],dtype=torch.int64).to('cuda')],dim=0)
+
+
+        wm_filtered_input_ids = self.batch_apply(filter_sample_beam_tokens,
+                                M=[input_ids, model_kwargs["token_type"], 
+                                   torch.ones(input_ids.size()[0],dtype=torch.int64).to('cuda') * beam_scorer.max_length],
+                                dtype=torch.cuda.LongTensor
+                               )
+        ####################################################
+        
+        decoded = beam_scorer.finalize(
+            wm_filtered_input_ids, beam_scores, next_tokens, next_indices, pad_token_id=pad_token_id, eos_token_id=eos_token_id
+        )
+
+        return decoded
+
+    
+    def _reorder_cache(self, past, beam_idx):
+        # if decoder past is not included in output
+        # speedy decoding is disabled and no need to reorder
+        if past is None:
+            logger.warning("You might want to consider setting `use_cache=True` to speed up decoding")
+            return past
+
+        reordered_decoder_past = ()
+        for layer_past_states in past:
+            # get the correct batch idx from layer past batch dim
+            # batch dim of `past` is at 2nd position
+            reordered_layer_past_states = ()
+            for layer_past_state in layer_past_states:
+                # need to set correct `past` for each of the four key / value states
+                reordered_layer_past_states = reordered_layer_past_states + (
+                    layer_past_state.index_select(0, beam_idx),
+                )
+
+            assert reordered_layer_past_states[0].shape == layer_past_states[0].shape
+            assert len(reordered_layer_past_states) == len(layer_past_states)
+
+            reordered_decoder_past = reordered_decoder_past + (reordered_layer_past_states,)
+        return reordered_decoder_past
+
+
+@add_start_docstrings("""T5 Model with a `language modeling` head on top and working memory in decoder. """, T5_START_DOCSTRING)
+class T5WM(T5PreTrainedModel):
+    _keys_to_ignore_on_load_missing = [
+        r"encoder\.embed_tokens\.weight",
+        r"decoder\.embed_tokens\.weight",
+        r"lm_head\.weight",
+        r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
+    ]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model_dim = config.d_model
+        self.config_vocab_size = config.vocab_size
+
+        self.shared = nn.Embedding(config.vocab_size, config.d_model)
+        self.wm_tok_type_embedding = nn.Embedding(2, config.d_model)
+
+        encoder_config = copy.deepcopy(config)
+        encoder_config.use_cache = False
+        encoder_config.is_encoder_decoder = False
+        self.encoder = T5Stack(encoder_config, self.shared)
+        # T5Stack(config, embed_tokens=None, memory_tokens=None, wm_tok_type_embed_tokens=None)
+
+        decoder_config = copy.deepcopy(config)
+        decoder_config.is_decoder = True
+        decoder_config.is_encoder_decoder = False
+        decoder_config.num_layers = config.num_decoder_layers
+        self.decoder = T5Stack(decoder_config, embed_tokens=self.shared, wm_tok_type_embed_tokens=self.wm_tok_type_embedding)
+
+        
+        self.work_mem_size = config.work_mem_size
+        self.nucleus_p = config.nucleus_p
+        
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size+2, bias=False)
+        
+        print(f"init lm_head {self.lm_head}")
+        print(f"init vocab_size {config.vocab_size}")
+
+        self.init_weights()
+        
+        print(f"after init vocab_size {config.vocab_size}, self.lm_head = {self.lm_head}")
+            
+
+    def get_input_embeddings(self):
+        return self.shared
+    
+    def get_wmtt_embeddings(self):
+        return self.wm_tok_type_embedding
+
+    def set_input_embeddings(self, new_embeddings):
+        self.shared = new_embeddings
+        self.encoder.set_input_embeddings(new_embeddings)
+        self.decoder.set_input_embeddings(new_embeddings)
+
+    def get_output_embeddings(self):
+        #zz = nn.Linear(self.model_dim, self.config_vocab_size, bias=False)
+        #zz.weight = nn.Parameter(self.lm_head.weight[...,:-2,:].clone())
+        return self.lm_head #zz #
+
+    def get_encoder(self):
+        return self.encoder
+
+    def get_decoder(self):
+        return self.decoder
+    
+    def tie_weights(self):
+        """
+        Tie the weights between the input embeddings and the output embeddings.
+
+        If the :obj:`torchscript` flag is set in the configuration, can't handle parameter sharing so we are cloning
+        the weights instead.
+        """
+        print("\n\nDOING CUSTOM TIE WEIGHTS\n\n")
+        output_embeddings = self.get_output_embeddings()
+        if output_embeddings is not None and self.config.tie_word_embeddings:
+            self._tie_or_clone_weights(output_embeddings, self.get_input_embeddings(), self.get_wmtt_embeddings())
+
+        if self.config.is_encoder_decoder and self.config.tie_encoder_decoder:
+            if hasattr(self, self.base_model_prefix):
+                self = getattr(self, self.base_model_prefix)
+            self._tie_encoder_decoder_weights(self.encoder, self.decoder, self.base_model_prefix)
+
+    
+    def _tie_or_clone_weights(self, output_embeddings, input_embeddings, wmtt_embeddings):
+        """Tie or clone module weights depending of whether we are using TorchScript or not"""
+        print("\n\nDOING CUSTOM TIE OR CLONE WEIGHTS\n\n")
+        
+        if self.config.torchscript:
+            print(f"GENERATING POTENTIALLY WRONG LM_HEAD EMBEDDINGS")
+            output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
+        else:
+            output_embeddings.weight.data = torch.cat([input_embeddings.weight.data[:, :], wmtt_embeddings.weight.data[:, :]],dim=0)
+        if getattr(output_embeddings, "bias", None) is not None:
+            output_embeddings.bias.data = torch.nn.functional.pad(
+                output_embeddings.bias.data,
+                (
+                    0,
+                    output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0],
+                ),
+                "constant",
+                0,
+            )
+        
+        if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
+            output_embeddings.out_features = input_embeddings.num_embeddings + wmtt_embeddings.num_embeddings
+
+
+    @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        head_mask=None,
+        inputs_embeds=None,
+        decoder_inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_normalized_attentions=False,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[-100, 0, ...,
+            config.vocab_size - 1]`. All labels set to ``-100`` are ignored (masked), the loss is only computed for
+            labels in ``[0, ..., config.vocab_size]``
+
+        Returns:
+
+        Examples::
+
+            >>> from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+            >>> tokenizer = T5Tokenizer.from_pretrained('t5-small')
+            >>> model = T5ForConditionalGeneration.from_pretrained('t5-small')
+
+            >>> input_ids = tokenizer('The <extra_id_0> walks in <extra_id_1> park', return_tensors='pt').input_ids
+            >>> labels = tokenizer('<extra_id_0> cute dog <extra_id_1> the <extra_id_2> </s>', return_tensors='pt').input_ids
+            >>> outputs = model(input_ids=input_ids, labels=labels)
+            >>> loss = outputs.loss
+            >>> logits = outputs.logits
+
+            >>> input_ids = tokenizer("summarize: studies have shown that owning a dog is good for you ", return_tensors="pt").input_ids  # Batch size 1
+            >>> outputs = model.generate(input_ids)
+        """
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        
+        
+        
+        ##############################################################################################################
+        # taken from https://discuss.pytorch.org/t/a-fast-way-to-apply-a-function-across-an-axis/8378
+        # torch.cuda.LongTensor == int64
+        def apply(func, M, dtype=torch.cuda.LongTensor):
+            unbinded = [torch.unbind(M_i, dim=0) for M_i in M]
+            tList = [func(m) for m in zip(*unbinded)]
+            
+            if isinstance(tList[0], tuple):
+                tLists = list(zip(*tList))
+                res = tuple(torch.stack(tList, dim=0).type(dtype) for tList in tLists)
+            else:
+                res = torch.stack(tList, dim=0).type(dtype)
+            return res
+
+        if self.work_mem_size > 0:
+                                        
+            # Encode if needed (training, first prediction pass)
+            if encoder_outputs is None:
+                # Convert encoder inputs in embeddings if needed
+                encoder_outputs = self.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    inputs_embeds=inputs_embeds,
+                    head_mask=head_mask,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
+                encoder_outputs = BaseModelOutput(
+                    last_hidden_state=encoder_outputs[0],
+                    hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
+                    attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                )
+
+            hidden_states = encoder_outputs[0]
+
+
+
+
+            if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+                # get decoder inputs from shifting lm labels to the right
+                #shift right means prepend start token and drop last token from labels
+                
+                decoder_input_ids = self._shift_right(labels)
+                unshifted_decoder_input_ids = self._preprocess_labels(labels)
+                # fixed: decoder_attention_mask should also be shifted if labels are shifted
+                if decoder_attention_mask is not None:
+                    decoder_attention_mask = self._shift_right(decoder_attention_mask, insert_token_id=1)
+
+            curr_decoder_input_ids = decoder_input_ids[:,:1]
+            if decoder_inputs_embeds is not None:
+                curr_decoder_inputs_embeds = decoder_inputs_embeds[:,:1]
+            else:
+                curr_decoder_inputs_embeds = self.decoder.wm_tok_type_embed_tokens(curr_decoder_input_ids)
+
+            token_type = torch.cat((torch.zeros_like(curr_decoder_input_ids[:, :-1],dtype=torch.int64).to('cuda'),
+                                         torch.ones_like(curr_decoder_input_ids[:, -1:],dtype=torch.int64).to('cuda')),
+                                        dim=-1)
+            
+
+            # If decoding with past key value states, only the last tokens
+            # should be given as an input
+            if past_key_values is not None:
+                assert labels is None, "Decoder should not use cached key value states when training."
+                if curr_decoder_input_ids is not None:
+                    curr_decoder_input_ids = curr_decoder_input_ids[:, -1:]
+                if curr_decoder_inputs_embeds is not None:
+                    curr_decoder_inputs_embeds = curr_decoder_inputs_embeds[:, -1:]
+                if token_type is not None:
+                    token_type = token_type[:, -1:]
+
+
+            
+
+            
+            
+            while curr_decoder_input_ids.size()[1] <= decoder_input_ids.size()[1] + self.work_mem_size:
+                
+           
+                # Decode
+                decoder_outputs = self.decoder(
+                    input_ids=curr_decoder_input_ids,
+                    wm_tok_type_ids=token_type,
+                    attention_mask=decoder_attention_mask,
+                    inputs_embeds=None,
+                    past_key_values=past_key_values,
+                    encoder_hidden_states=hidden_states,
+                    encoder_attention_mask=attention_mask,
+                    head_mask=head_mask,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+
+                sequence_output = decoder_outputs[0]
+
+                if self.config.tie_word_embeddings:
+                    # Rescale output before projecting on vocab
+                    # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                    sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+                logits = self.lm_head(sequence_output) # lm_logits
+                
+                
+                token_id_preds = logits[..., :-2].contiguous() # lm_logits
+                pred_wm_tok_type_logits = logits[..., -1:, -2:].contiguous()
+                predicted_token_type = torch.argmax(pred_wm_tok_type_logits, dim=-1).type(torch.cuda.LongTensor)
+
+                token_type = torch.cat((token_type, predicted_token_type), dim=-1) # wm_tok_type_ids
+
+                #nucleus sampling here
+                def nucleus_sampling(x):
+                    logits = x[0] 
+                    p = x[1] #0.9
+
+                    # taken from https://github.com/huggingface/transformers/blob/0d00c08da0aaa03dc00e2b6dce9574aee3402967/src/transformers/generation_logits_process.py#L171
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+                    # Remove tokens with cumulative top_p above the threshold (token with 0 are kept)
+                    sorted_indices_to_remove = cumulative_probs > p
+                    # Shift the indices to the right to keep also the first token above the threshold
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    # scatter sorted tensors to original indexing
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    scores = logits.masked_fill(indices_to_remove, -float("Inf"))
+                    probs = torch.nn.functional.softmax(scores, dim=-1)
+                    _next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+                    return _next_tokens
+
+
+                def sample_tokens(x):
+                    preds = x[0]
+                    token_type = x[1]
+                    nucleus_p = x[2]
+                    if token_type == 0:
+                        return nucleus_sampling((preds, nucleus_p))
+                    else:
+                        return torch.argmax(preds, dim=-1)
+
+
+                predicted_id = apply(sample_tokens, 
+                                     M=[token_id_preds[...,-1:,:],
+                                        predicted_token_type,
+                                        torch.ones(token_id_preds.size()[0]).to('cuda') * self.nucleus_p
+                                       ],
+                                     dtype=torch.cuda.LongTensor)
+
+
+                #insert teacher forcing here
+                def sample_teacher_forcing(x):
+                    predicted_id_sample = x[0]
+                    token_type_sample = x[1] 
+                    tar_inp_sample = x[2] 
+                    tar_real_sample = x[3]
+
+                    idx = torch.sum(token_type_sample[1:-1])
+
+                    if torch.gt(
+                        torch.sub(
+                            torch.tensor([token_type_sample[1:].size()[0]], dtype=torch.int64).to('cuda'),
+                            torch.sum(token_type_sample[1:])
+                        ),
+                        torch.tensor(self.work_mem_size).to('cuda')
+                    ):
+                        token_type_sample = torch.cat([token_type_sample[:-1], torch.tensor([1],dtype=torch.int64).to('cuda')], dim=0)
+
+                    if torch.logical_and(torch.tensor(torch.equal(token_type_sample[-1], torch.tensor(1).to('cuda'))).to('cuda'),
+                                         torch.lt(idx.type(torch.cuda.IntTensor),
+                                                  tar_real_sample.size()[0]
+                                                 )
+                                        ):
+                        tar_inp_sample = torch.cat([tar_inp_sample, torch.tensor([max(0, tar_real_sample[idx])]).to('cuda')], 0)
+                    else:
+                        tar_inp_sample = torch.cat([tar_inp_sample, max(torch.tensor([0]).to('cuda'),predicted_id_sample)], 0)
+
+                    return tar_inp_sample, token_type_sample
+
+                curr_decoder_input_ids, token_type = apply(sample_teacher_forcing,
+                                                   M=[predicted_id, token_type, 
+                                                      curr_decoder_input_ids, unshifted_decoder_input_ids
+                                                     ],
+                                                   dtype=torch.cuda.LongTensor)    
+
+            # print(f"self.lm_head = {self.lm_head}, logits = {logits.size()}")
+    
+            def filter_sample_seq_tokens(x):
+                #here logits and token type are for tokens starting the first after the start token (very first mem tokens and start are discarded)
+                predicted_logits_sample = x[0]
+                token_type_sample = x[1]
+                tar_real = x[2]
+                tar_seq_len = tar_real.size()[0]
+                curr_token_logits = torch.masked_select(predicted_logits_sample, torch.gt(token_type_sample, 0).unsqueeze(0).transpose(0,1).repeat(1,predicted_logits_sample.size()[1])).view(-1, predicted_logits_sample.size()[1])[:tar_seq_len,:]
+                end_token_logits = torch.cat([torch.zeros((tar_seq_len - curr_token_logits.size()[0],
+                                                     1),
+                                                     dtype=torch.float32).to('cuda'),
+                                            torch.ones((tar_seq_len - curr_token_logits.size()[0], 
+                                                     curr_token_logits.size()[1]-1),
+                                                    dtype=torch.float32).to('cuda')
+                                           ],
+                                           -1)
+                return torch.cat([curr_token_logits,
+                                end_token_logits
+                               ], 0)
+
+            
+            seq_predictions = apply(filter_sample_seq_tokens,
+                                    M=[token_id_preds, token_type[...,1:], 
+                                       unshifted_decoder_input_ids
+                                      ],
+                                    dtype=torch.cuda.FloatTensor
+                                   )
+            # print(f"seq_predictions = {seq_predictions.size()}")
+            lm_logits = seq_predictions
+            
+        
+        else:
+        
+           ####################################################################################################### 
+
+
+            ##########!!!!!!!!!!!!!!!!!!!!!!!!!!!!!#################
+            #here we need a loop to generate all the mem autoregressively and then one last pass to generate the rest of the batch sequences
+
+
+            # Encode if needed (training, first prediction pass)
+            if encoder_outputs is None:
+                # Convert encoder inputs in embeddings if needed
+                encoder_outputs = self.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    inputs_embeds=inputs_embeds,
+                    head_mask=head_mask,
+                    output_attentions=output_attentions,
+                    output_normalized_attentions=output_normalized_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
+                encoder_outputs = BaseModelOutput(
+                    last_hidden_state=encoder_outputs[0],
+                    hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
+                    attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                )
+
+            hidden_states = encoder_outputs[0]
+
+            if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+                # get decoder inputs from shifting lm labels to the right
+                decoder_input_ids = self._shift_right(labels)
+                # fixed: decoder_attention_mask should also be shifted if labels are shifted
+                if decoder_attention_mask is not None:
+                    decoder_attention_mask = self._shift_right(decoder_attention_mask, insert_token_id=1)
+
+            # If decoding with past key value states, only the last tokens
+            # should be given as an input
+            if past_key_values is not None:
+                assert labels is None, "Decoder should not use cached key value states when training."
+                if decoder_input_ids is not None:
+                    decoder_input_ids = decoder_input_ids[:, -1:]
+                if decoder_inputs_embeds is not None:
+                    decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
+
+            # Decode
+            decoder_outputs = self.decoder(
+                input_ids=decoder_input_ids,
+                wm_tok_type_ids=token_type,
+                attention_mask=decoder_attention_mask,
+                inputs_embeds=decoder_inputs_embeds,
+                past_key_values=past_key_values,
+                encoder_hidden_states=hidden_states,
+                encoder_attention_mask=attention_mask,
+                head_mask=head_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_normalized_attentions=output_normalized_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+            sequence_output = decoder_outputs[0]
+
+            if self.config.tie_word_embeddings:
+                # Rescale output before projecting on vocab
+                # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                sequence_output = sequence_output * (self.model_dim ** -0.5)
+
+            lm_logits = self.lm_head(sequence_output)
+
+
+
+        
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
+            # print(f"lm_logits = {lm_logits.size()}, labels.view(-1) = {labels.view(-1).size()}")
+            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
+            # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
+
+        if not return_dict:
+            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
+            return ((loss,) + output) if loss is not None else output
+
+        return Seq2SeqLMOutput(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
+
+    def prepare_inputs_for_generation(
+        self, input_ids, past=None, attention_mask=None, use_cache=None, encoder_outputs=None, **kwargs
+    ):
+
+        # cut decoder_input_ids if past is used
+        if past is not None:
+            input_ids = input_ids[:, -1:]
+
+        return {
+            "decoder_input_ids": input_ids,
+            "past_key_values": past,
+            "encoder_outputs": encoder_outputs,
+            "attention_mask": attention_mask,
+            "use_cache": use_cache,
+        }
+
+    def _reorder_cache(self, past, beam_idx):
+        # if decoder past is not included in output
+        # speedy decoding is disabled and no need to reorder
+        if past is None:
+            logger.warning("You might want to consider setting `use_cache=True` to speed up decoding")
+            return past
+
+        reordered_decoder_past = ()
+        for layer_past_states in past:
+            # get the correct batch idx from layer past batch dim
+            # batch dim of `past` is at 2nd position
+            reordered_layer_past_states = ()
+            for layer_past_state in layer_past_states:
+                # need to set correct `past` for each of the four key / value states
+                reordered_layer_past_states = reordered_layer_past_states + (
+                    layer_past_state.index_select(0, beam_idx),
+                )
+
+            assert reordered_layer_past_states[0].shape == layer_past_states[0].shape
+            assert len(reordered_layer_past_states) == len(layer_past_states)
+
+            reordered_decoder_past = reordered_decoder_past + (reordered_layer_past_states,)
+        return reordered_decoder_past    
 
 
 class T5CDQAttention(nn.Module):

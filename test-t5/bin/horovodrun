@@ -1,0 +1,12 @@
+#!/cephfs/home/asagirova/asc-trr/ted_notebooks/t5-experiments/test-t5/bin/python3
+# EASY-INSTALL-ENTRY-SCRIPT: 'horovod==0.21.3','console_scripts','horovodrun'
+__requires__ = 'horovod==0.21.3'
+import re
+import sys
+from pkg_resources import load_entry_point
+
+if __name__ == '__main__':
+    sys.argv[0] = re.sub(r'(-script\.pyw?|\.exe)?$', '', sys.argv[0])
+    sys.exit(
+        load_entry_point('horovod==0.21.3', 'console_scripts', 'horovodrun')()
+    )

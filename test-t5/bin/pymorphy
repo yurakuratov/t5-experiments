@@ -1,0 +1,4 @@
+#!/cephfs/home/asagirova/asc-trr/ted_notebooks/t5-experiments/test-t5/bin/python3
+import sys
+from pymorphy2 import cli
+sys.exit(cli.main())

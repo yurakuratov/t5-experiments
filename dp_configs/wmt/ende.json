@@ -76,8 +76,8 @@
       }
     ],
     "validation_patience": -1,
-    "val_every_n_batches": 5000,
-    "log_every_n_batches": 5000,
+    "val_every_n_batches": 3,
+    "log_every_n_batches": 2,
     "max_batches": 786432,
     "show_examples": false,
     "validate_first": false,

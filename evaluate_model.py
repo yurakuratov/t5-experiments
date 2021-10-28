@@ -1,7 +1,10 @@
+# -*- coding: utf-8 -*-
+
 import json
 import logging
 import re
 import shutil
+
 from copy import deepcopy
 from pathlib import Path
 from typing import Optional
@@ -9,8 +12,8 @@ from typing import Optional
 import pandas as pd
 import torch
 import typer
-from deeppavlov import evaluate_model, train_evaluate_model_from_config
 from horovod import run as hvd_run
+from deeppavlov import evaluate_model, train_evaluate_model_from_config
 from tqdm import tqdm
 
 # fixes error with serializing evaluate_model/train_evaluate_model_from_config funcs during hvd call
@@ -19,7 +22,6 @@ import dill
 dill.extend(False)
 import cloudpickle  # noqa: F401, E402
 dill.extend(True)
-
 from utils import expand_dp_path  # noqa: E402
 from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: E402
 
@@ -31,7 +33,7 @@ pd.options.mode.chained_assignment = None
 
 n_gpus = torch.cuda.device_count()
 app = typer.Typer()
-
+print('imports DONE!!!!\n')
 
 def hvd_dp_run(config, fn=evaluate_model, check_metrics=False):
     config = deepcopy(config)
@@ -39,6 +41,7 @@ def hvd_dp_run(config, fn=evaluate_model, check_metrics=False):
         config['train']['class_name'] = 'dp_hvd_trainer:HvdTorchNNTrainer'
         # hvd and gradient accumulation do not work together in DP currently
         config['chainer']['pipe'][2]['sub_batch_size'] = None
+        
         metrics = hvd_run(fn, args=(config,), np=n_gpus, use_gloo=True)
         # check that metrics from all workers are equal
         if check_metrics:
