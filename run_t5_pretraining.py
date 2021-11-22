@@ -153,7 +153,7 @@ def save_model(args, i, model, optimizer, suffix=''):
                     "iteration": i,
                     }
         if args.fp16:
-            to_save['amp'] = amp.state_dict(),
+            to_save['amp'] = amp.state_dict()
         torch.save(to_save, save_path)
         logger.info(f'Model was saved to {save_path}')
 
@@ -343,6 +343,10 @@ if __name__ == '__main__':
                 outputs = model(input_ids=batch['inputs'][j: j + args.batch_size],
                                 attention_mask=batch['inputs_mask'][j: j + args.batch_size],
                                 # todo: use decoder_attention mask!
+                                # it is okay to not use decoder_attention_mask as loss from paddings is ignored
+                                # and decoder_attention_mask should be zero only for paddings
+                                # so, anyway padding are ignored.
+                                # decoder_attention_mask=batch['targets_mask'][j: j + args.batch_size],
                                 labels=batch['targets'][j: j + args.batch_size])
                 if args.fp16 and args.apex_opt_lvl == 'O2':
                     loss = outputs['loss']
