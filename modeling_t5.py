@@ -1624,9 +1624,15 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
 
         if isinstance(tList[0], tuple):
             tLists = list(zip(*tList))
-            res = tuple(torch.stack(tList, dim=0).type(dtype) for tList in tLists)
+            try:
+                res = tuple(torch.stack(tList, dim=0).type(dtype) for tList in tLists)
+            except:
+                print(f"\n\nBATCH APPLY multiple output: {[[i.size() for i in tList] for tList in tLists]}")
         else:
-            res = torch.stack(tList, dim=0).type(dtype)
+            try:
+                res = torch.stack(tList, dim=0).type(dtype)
+            except:
+                print(f"\n\nBATCH APPLY single output: {[i.size() for i in tList]}")
         return res
 
 
@@ -1773,6 +1779,8 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
                 if decoder_attention_mask is not None:
                     decoder_attention_mask = self._shift_right(decoder_attention_mask, insert_token_id=1)
                     curr_decoder_attention_mask = decoder_attention_mask[:,:1]
+                else:
+                    curr_decoder_attention_mask = decoder_attention_mask
             
             
             
@@ -1837,13 +1845,19 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
                     token_type_sample = x[0] 
                     
                     if torch.gt(
-                        torch.sub(
-                            torch.tensor([token_type_sample[1:].size()[0]], dtype=torch.int64).to('cuda'),
-                            torch.sum(token_type_sample[1:])
-                        ),
+                        torch.sum(1 - token_type_sample[1:]),
                         torch.tensor(self.work_mem_size).to('cuda')
                     ):
-                        token_type_sample = torch.cat([token_type_sample[:-1], torch.tensor([1],dtype=torch.int64).to('cuda')], dim=0)
+                        num_false_mem_tokens = torch.sub(
+                            torch.sum(1 - token_type_sample[1:]),
+                            torch.tensor(self.work_mem_size).to('cuda')
+                        )
+                        if num_false_mem_tokens > 1:
+                            print(f"num_false_mem_tokens = {num_false_mem_tokens}, {torch.sum(1 - token_type_sample[1:])}")
+                        token_type_sample = torch.cat([
+                            token_type_sample[:-num_false_mem_tokens], 
+                            torch.ones(num_false_mem_tokens,dtype=torch.int64).to('cuda')
+                        ], dim=0)
                     return token_type_sample
 
                 token_type = self.batch_apply(bound_wm, M=[token_type], dtype=torch.cuda.LongTensor)
@@ -2415,7 +2429,7 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
             tar_beam_and_nucleus_wm = self.batch_apply(sample_or_beam_search, 
                                  M=[outputs.logits[...,-1:,:],
                                     outputs.token_type[...,-1:],
-                                    torch.ones(outputs.logits.size()[0]).to('cuda') * self.nucleus_p,
+                                    torch.full((outputs.token_type.size()[0],), self.nucleus_p, dtype=torch.int64).to('cuda'),
                                     beam_next_tokens.unsqueeze(-1)
                                    ],
                                  dtype=torch.cuda.LongTensor)

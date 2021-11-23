@@ -8,6 +8,7 @@ import t5
 from t5.data.tasks import TaskRegistry  # noqa: F401 TaskRegistry should be imported before any usage of tasks
 from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixtures
 from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
+from t5.evaluation.metrics import squad as t5_squad
 from t5.evaluation.metrics import bleu as t5_bleu
 
 import tensorflow.compat.v1 as tf
@@ -49,6 +50,25 @@ from transformers.models.t5 import T5_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: E40
 from transformers.data.processors.utils import InputFeatures  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+
+from create_hotpotqa_task import nq_dataset_fn #, trivia_preprocessor
+from t5.data.tasks import DEFAULT_OUTPUT_FEATURES
+t5.data.TaskRegistry.add(
+    "hotpotqa_context",
+    # Specify the task type.
+    t5.data.Task,
+    # Supply a function which returns a tf.data.Dataset.
+    dataset_fn=nq_dataset_fn,
+    splits=["train", "validation"],
+    text_preprocessor=[
+        t5.data.preprocessors.squad,
+        #t5.seqio.preprocessors.tokenize,
+        #t5.seqio.CacheDatasetPlaceholder(),
+        #t5.seqio.preprocessors.append_eos_after_trim,
+    ],
+    postprocess_fn=t5.data.postprocessors.qa,
+    metric_fns=[t5.evaluation.metrics.squad],
+    output_features=DEFAULT_OUTPUT_FEATURES)
 
 class T5DatasetReader(DatasetReader):
 
@@ -92,6 +112,10 @@ class T5TFDatasetIterator(DataLearningIterator):
 
     def __init__(self, data, **kwargs):
         self.data = data
+        self.samples_per_epoch = 0
+        for sample in self.data['train']:
+            self.samples_per_epoch += 1
+        log.info(f'self.samples_per_epoch = {self.samples_per_epoch}')
 
     def _preprocess(self, x):
         return x['inputs_pretokenized'].numpy().decode('utf8'), x['targets_pretokenized'].numpy().decode('utf8')
@@ -101,6 +125,8 @@ class T5TFDatasetIterator(DataLearningIterator):
         batch_x, batch_y = (), ()
         # hm, islice is too slow for getting batches from tf.Dataset
         for sample in self.data[data_type]:
+            #if 'valid' in data_type:
+            #    print(f"sample = {sample.keys()}")
             x, y = self._preprocess(sample)
             batch_x += (x,)
             batch_y += (y,)
@@ -242,7 +268,7 @@ class T5Text2TextModel(TorchModel):
 
             if self.finetuning_model_config_path is not None:
                 print('copying weights from checkpoint model to the model with memory')
-                self.model = load_finetuning_model(self.model, self.finetuning_model_config_path, self.checkpoint)
+                self.model = load_finetuning_model(self.model, self.pretrained_model, self.finetuning_model_config_path, self.checkpoint)
             
             
             
@@ -313,7 +339,7 @@ class T5Text2TextModel(TorchModel):
         input_x = self._build_input(features)
         input_y = self._build_input(labels)
         batch_size = len(input_x['input_ids'])
-
+        
         input_y['input_ids'] -= (1 - input_y['attention_mask']) * 100
 
         self.optimizer.zero_grad()
@@ -449,6 +475,16 @@ class T5Text2TextPostprocessor(Component):
 def f1_score_with_invalid(y_true, y_predicted) -> float:
     # used by qqp, mrpc
     return t5_f1_score_with_invalid(y_true, y_predicted)['f1'] / 100.0
+
+@register_metric('t5_squad_f1')
+def t5_squad_f1(y_true, y_predicted) -> float:
+    # used by qqp, mrpc
+    return t5_squad(y_true, y_predicted)['f1'] / 100.0
+
+@register_metric('t5_squad_em')
+def t5_squad_em(y_true, y_predicted) -> float:
+    # used by qqp, mrpc
+    return t5_squad(y_true, y_predicted)['em'] / 100.0
 
 
 @register_metric('t5_bleu')
