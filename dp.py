@@ -214,6 +214,7 @@ class T5Text2TextModel(TorchModel):
                  length_penalty: float = 0.4,
                  sub_batch_size: Optional[int] = None,
                  finetuning_model_config_path: Optional[str] = None,
+                 grad_acc_steps_per_batch: Optional[int] = None, 
                  **kwargs):
         self.pretrained_model = pretrained_model
         self.t5_configs_path = t5_configs_path
@@ -225,6 +226,7 @@ class T5Text2TextModel(TorchModel):
         self.clip_norm = clip_norm
         self.sub_batch_size = sub_batch_size
         self.finetuning_model_config_path = finetuning_model_config_path
+        self.grad_acc_steps_per_batch = grad_acc_steps_per_batch
 
         # super().__init__ calls self.load()
         super().__init__(optimizer=optimizer,
@@ -234,6 +236,11 @@ class T5Text2TextModel(TorchModel):
         if self.lr_scheduler_name:
             self.lr_scheduler = getattr(torch.optim.lr_scheduler, self.lr_scheduler_name)(
                 self.optimizer, **self.lr_scheduler_parameters)
+        
+        if self.grad_acc_steps_per_batch is not None:
+            print(f"\n\nself.grad_acc_steps_per_batch = {self.grad_acc_steps_per_batch}\n\n")
+        else:
+            self.grad_acc_steps_per_batch = 1
 
         if hvd.size() > 1:
             # todo: mb remove if hvd.size() > 1 conds
@@ -243,7 +250,7 @@ class T5Text2TextModel(TorchModel):
             hvd.broadcast_optimizer_state(self.optimizer, root_rank=0)
             if self.sub_batch_size is not None:
                 raise RuntimeError('hvd and self.sub_batch_size != None are not supported')
-
+            
     def load(self, fname=None):
         if fname is not None:
             self.load_path = fname
@@ -264,7 +271,9 @@ class T5Text2TextModel(TorchModel):
             from utils import load_experiment, load_finetuning_model
             print('going to load experiment from ckpt')
             self.model, self.tokenizer = load_experiment(self.pretrained_model, t5_configs_path=self.t5_configs_path,
-                                                         checkpoint=self.checkpoint, check_commit=self.check_commit)
+                                                         checkpoint=self.checkpoint, check_commit=self.check_commit,
+                                                         finetuning_model_config_path=self.finetuning_model_config_path
+                                                        )
 
             if self.finetuning_model_config_path is not None:
                 print('copying weights from checkpoint model to the model with memory')
@@ -309,7 +318,9 @@ class T5Text2TextModel(TorchModel):
                 self.epochs_done = checkpoint.get("epochs_done", 0)
             else:
                 log.info(f"Initilized with specified pretrained_model. Load path {weights_path} does not exist.")
-
+        
+        if self.grad_acc_steps_per_batch is not None:
+            print(f"\n\nload: self.grad_acc_steps_per_batch = {self.grad_acc_steps_per_batch}\n\n")
         if hvd.size() > 1:
             # all workers load model parameters and optimizer state from disk, no broadcasting needed
             log.info('hvd: creating DistributedOptimizer in load')
@@ -317,7 +328,7 @@ class T5Text2TextModel(TorchModel):
                                                       named_parameters=self.model.named_parameters(),
                                                       op=hvd.Average,
                                                       gradient_predivide_factor=1.0,
-                                                      backward_passes_per_step=1
+                                                      backward_passes_per_step=self.grad_acc_steps_per_batch # 1
                                                       )
 
     def _build_input(self, features: List[InputFeatures]):
@@ -346,11 +357,17 @@ class T5Text2TextModel(TorchModel):
         # todo: refactor sub-batches are used in __call__ and train_on_batch
         # todo: full batch goes to gpu, mb only sub-batch?
         sub_batch_size = self.sub_batch_size
-        if sub_batch_size is None:
+        grad_acc_steps_per_batch = self.grad_acc_steps_per_batch
+        if sub_batch_size is None and grad_acc_steps_per_batch is None:
             sub_batch_size = batch_size
+        elif grad_acc_steps_per_batch is not None:
+            sub_batch_size = batch_size // grad_acc_steps_per_batch
 
         batch_loss = 0
-        n_gradient_acc_steps = max(1, batch_size // sub_batch_size)
+        if grad_acc_steps_per_batch is None:
+            n_gradient_acc_steps = max(1, batch_size // sub_batch_size)
+        else:
+            n_gradient_acc_steps = grad_acc_steps_per_batch
         for i in range(0, batch_size, sub_batch_size):
             outputs = self.model(input_ids=input_x['input_ids'][i: i + sub_batch_size],
                                  attention_mask=input_x['attention_mask'][i: i + sub_batch_size],

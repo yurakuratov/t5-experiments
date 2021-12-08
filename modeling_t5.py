@@ -1540,6 +1540,7 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
 
         
         self.work_mem_size = config.work_mem_size
+        print(f"\n\nwork_mem_size = {self.work_mem_size}\n\n")
         self.nucleus_p = config.nucleus_p
         
         self.lm_head = nn.Linear(config.d_model, config.vocab_size+2, bias=False)
@@ -2121,7 +2122,6 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
             ##########!!!!!!!!!!!!!!!!!!!!!!!!!!!!!#################
             #here we need a loop to generate all the mem autoregressively and then one last pass to generate the rest of the batch sequences
 
-            token_type=None
             # Encode if needed (training, first prediction pass)
             if encoder_outputs is None:
                 # Convert encoder inputs in embeddings if needed
@@ -2159,6 +2159,8 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
                     decoder_input_ids = decoder_input_ids[:, -1:]
                 if decoder_inputs_embeds is not None:
                     decoder_inputs_embeds = decoder_inputs_embeds[:, -1:]
+                    
+            token_type = torch.ones_like(decoder_input_ids, dtype=torch.int64)
 
             # Decode
             decoder_outputs = self.decoder(
@@ -2184,7 +2186,9 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
                 # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
                 sequence_output = sequence_output * (self.model_dim ** -0.5)
 
-            lm_logits = self.lm_head(sequence_output)
+            logits = self.lm_head(sequence_output)
+            lm_logits = logits[..., :-2].contiguous() # lm_logits
+                
 
 
 
@@ -2200,7 +2204,7 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
             output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
             return ((loss,) + output) if loss is not None else output
 
-        return Seq2SeqLMOutput(
+        return Seq2SeqWMLMOutput(
             loss=loss,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
@@ -2210,8 +2214,10 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
+            token_type=token_type,
         )
 
+        
     def prepare_inputs_for_generation(
         self, input_ids, past=None, attention_mask=None, use_cache=None, encoder_outputs=None, token_type=None, **kwargs
     ):
@@ -2372,7 +2378,7 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
         
         if model_kwargs.get("token_type", 0) == 0:
             model_kwargs["token_type"] = None
-            
+        
         while cur_len < max_length:
             # input ids - a tensor of decoder input tokens batch
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -2405,6 +2411,7 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
                 next_token_scores,
                 next_tokens,
                 next_indices,
+                outputs.token_type[:,:-1],
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
             )

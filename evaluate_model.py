@@ -75,6 +75,7 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
                         train_subbatch_size: Optional[int] = None,
                         learning_rate: Optional[float] = None,
                         start_from_batch: Optional[int] = None,
+                        grad_acc_steps_per_batch: Optional[int] = None,
                         ) -> dict:
     """Evaluate checkpoint on  folder on tasks from `task_config_path`
 
@@ -126,6 +127,11 @@ def evaluate_checkpoint(pretrained_checkpoint: str,
             config['train']['batch_size'] = train_batch_size
         if train_subbatch_size and n_gpus == 1:
             config['chainer']['pipe'][2]['sub_batch_size'] = train_subbatch_size
+        elif grad_acc_steps_per_batch is not None and n_gpus > 1:
+            config['chainer']['pipe'][2]['grad_acc_steps_per_batch'] = grad_acc_steps_per_batch
+            if train_subbatch_size:
+                config['chainer']['pipe'][2]['sub_batch_size'] = None
+
         if learning_rate:
             config['chainer']['pipe'][2]['optimizer_parameters']['lr'] = learning_rate
         # save config
@@ -171,14 +177,16 @@ def train_mixture(task_config: Path = typer.Option(...),
                   train_batch_size: Optional[int] = typer.Option(None),
                   train_subbatch_size: Optional[int] = typer.Option(None),
                   learning_rate: Optional[float] = typer.Option(None, '--lr'),
-                  start_from_batch: Optional[int] = typer.Option(None)
+                  start_from_batch: Optional[int] = typer.Option(None),
+                  grad_acc_steps_per_batch: Optional[int] = typer.Option(None)
                  ):
     logger.info(f'starting to train {pretrained_checkpoint} on tasks:')
     logger.info(f'\t{task_config.name}')
     _ = evaluate_checkpoint(pretrained_checkpoint, task_config, suffix=suffix, train=True,
                             train_batch_size=train_batch_size, train_subbatch_size=train_subbatch_size,
                             learning_rate=learning_rate,
-                            start_from_batch=start_from_batch
+                            start_from_batch=start_from_batch,
+                            grad_acc_steps_per_batch=grad_acc_steps_per_batch
                             )
     logger.info('train mixture - DONE')
 
@@ -249,7 +257,8 @@ def single(task_config: Path = typer.Option(...),
            train_batch_size: Optional[int] = typer.Option(None),
            train_subbatch_size: Optional[int] = typer.Option(None),
            learning_rate: Optional[float] = typer.Option(None, '--lr'),
-           start_from_batch: Optional[int] = typer.Option(None)
+           start_from_batch: Optional[int] = typer.Option(None),
+           grad_acc_steps_per_batch: Optional[int] = typer.Option(None)
            ):
     """train&eval pretrained_checkpoint on each task independently
     """
@@ -270,7 +279,8 @@ def single(task_config: Path = typer.Option(...),
                                            train=True,
                                            train_batch_size=train_batch_size, train_subbatch_size=train_subbatch_size,
                                            learning_rate=learning_rate,
-                                           start_from_batch=start_from_batch
+                                           start_from_batch=start_from_batch,
+                                           grad_acc_steps_per_batch=grad_acc_steps_per_batch
                                            )
         eval_results['is_mixture'] = False
         if not str(pretrained_checkpoint) in T5_PRETRAINED_MODEL_ARCHIVE_LIST:
