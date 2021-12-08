@@ -392,8 +392,11 @@ class T5Text2TextModel(TorchModel):
         batch_size = len(_input['input_ids'])
 
         sub_batch_size = self.sub_batch_size
-        if sub_batch_size is None:
+        grad_acc_steps_per_batch = self.grad_acc_steps_per_batch
+        if sub_batch_size is None and grad_acc_steps_per_batch is None:
             sub_batch_size = batch_size
+        elif grad_acc_steps_per_batch is not None:
+            sub_batch_size = batch_size // grad_acc_steps_per_batch
 
         predicted_tokens = []
         with torch.no_grad():
