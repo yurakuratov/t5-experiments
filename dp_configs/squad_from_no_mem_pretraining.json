@@ -33,7 +33,6 @@
         "class_name": "dp:T5Text2TextModel",
         "pretrained_model": "{PRETRAINED_PATH}",
         "t5_configs_path": ".",
-        "finetuning_model_config_path": "./runs/finetuning_model_config_wm0.json",
         "grad_acc_steps_per_batch": 1,
         "check_commit": false,
         "sub_batch_size": 0,

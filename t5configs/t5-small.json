@@ -13,7 +13,7 @@
   "layer_norm_epsilon": 1e-06,
   "model_type": "t5",
   "n_positions": 512,
-  "nucleus_p": 0.9,
+  "nucleus_p": 0.0,
   "num_heads": 8,
   "num_layers": 6,
   "output_past": true,
@@ -49,5 +49,5 @@
     }
   },
   "vocab_size": 32128,
-  "work_mem_size": 10
+  "work_mem_size": 0
 }

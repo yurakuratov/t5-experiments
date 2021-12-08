@@ -37,13 +37,13 @@ def load_experiment(path, t5_configs_path, checkpoint=None, check_commit=True, f
     path = Path(path)
     cfg = json.load((path / 'config.json').open('r'))
     
-    finetuning_cfg = json.load((Path(finetuning_model_config_path)).open('r'))
-    if (cfg['model_cfg'] != finetuning_cfg['t5_config']) and (cfg['model_cls'] == finetuning_cfg['model_cls']):
-        print(f"\n\nmodel_cls match, model_cfg != t5_config, loading finetuning t5_config\n\n")
-        model_cfg = Path(t5_configs_path) / finetuning_cfg['t5_config'] if finetuning_cfg['t5_config'] is not None else None
-    else:    
-        model_cfg = Path(t5_configs_path) / cfg['model_cfg'] if cfg['model_cfg'] is not None else None
+    model_cfg = Path(t5_configs_path) / cfg['model_cfg'] if cfg['model_cfg'] is not None else None
     
+    if finetuning_model_config_path is not None:
+        finetuning_cfg = json.load((Path(finetuning_model_config_path)).open('r'))
+        if (cfg['model_cfg'] != finetuning_cfg['t5_config']) and (cfg['model_cls'] == finetuning_cfg['model_cls']):
+            print(f"\n\nmodel_cls match, model_cfg != t5_config, loading finetuning t5_config\n\n")
+            model_cfg = Path(t5_configs_path) / finetuning_cfg['t5_config'] if finetuning_cfg['t5_config'] is not None else None
     model_cls = get_cls_by_name(cfg['model_cls'])
     if check_commit:
         assert cfg['COMMIT'] == get_git_hash_commit(), f"expected commit {cfg['COMMIT']}, " \
