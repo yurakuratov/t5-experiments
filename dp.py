@@ -376,18 +376,22 @@ class T5Text2TextModel(TorchModel):
                                      labels=input_y['input_ids'][i: i + sub_batch_size],
                                      decoder_attention_mask=input_y['attention_mask'][i: i + sub_batch_size]
                                     )
+                loss = outputs.loss / n_gradient_acc_steps
+                batch_loss += loss.detach().item()
+                loss.backward()
             else:
-                if input_x['input_ids'][i:].size()[0] // sub_batch_size == 1:
-                    outputs = self.model(input_ids=input_x['input_ids'][i:],
-                                         attention_mask=input_x['attention_mask'][i:],
-                                         labels=input_y['input_ids'][i:],
-                                         decoder_attention_mask=input_y['attention_mask'][i:]
-                                        )
-                else:
-                    raise RuntimeError('Last subbatch is larger than expected')
-            loss = outputs.loss / n_gradient_acc_steps
-            batch_loss += loss.detach().item()
-            loss.backward()
+                if input_x['input_ids'][i:].size()[0] // sub_batch_size != 1:
+                    print(f"\n\nLast subbatch size = {input_x['input_ids'][i:].size()}, batch_size = {batch_size} and sub_batch_size = {sub_batch_size}\n\n")
+                outputs = self.model(input_ids=input_x['input_ids'][i:],
+                                     attention_mask=input_x['attention_mask'][i:],
+                                     labels=input_y['input_ids'][i:],
+                                     decoder_attention_mask=input_y['attention_mask'][i:]
+                                    )
+                
+                loss = outputs.loss / n_gradient_acc_steps
+                batch_loss += loss.detach().item()
+                loss.backward()
+                break
                 
 
         if self.clip_norm:
