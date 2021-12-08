@@ -367,20 +367,33 @@ class T5Text2TextModel(TorchModel):
         if grad_acc_steps_per_batch is None:
             n_gradient_acc_steps = max(1, batch_size // sub_batch_size)
         else:
-            n_gradient_acc_steps = grad_acc_steps_per_batch
-        for i in range(0, batch_size, sub_batch_size):
-            outputs = self.model(input_ids=input_x['input_ids'][i: i + sub_batch_size],
-                                 attention_mask=input_x['attention_mask'][i: i + sub_batch_size],
-                                 labels=input_y['input_ids'][i: i + sub_batch_size],
-                                 decoder_attention_mask=input_y['attention_mask'][i: i + sub_batch_size]
-                                )
+            n_gradient_acc_steps = max(1, grad_acc_steps_per_batch)
+        
+        for backward_counter, i in enumerate(range(0, batch_size, sub_batch_size)):
+            if backward_counter < n_gradient_acc_steps - 1:
+                outputs = self.model(input_ids=input_x['input_ids'][i: i + sub_batch_size],
+                                     attention_mask=input_x['attention_mask'][i: i + sub_batch_size],
+                                     labels=input_y['input_ids'][i: i + sub_batch_size],
+                                     decoder_attention_mask=input_y['attention_mask'][i: i + sub_batch_size]
+                                    )
+            else:
+                if input_x['input_ids'][i:].size()[0] // sub_batch_size == 1:
+                    outputs = self.model(input_ids=input_x['input_ids'][i:],
+                                         attention_mask=input_x['attention_mask'][i:],
+                                         labels=input_y['input_ids'][i:],
+                                         decoder_attention_mask=input_y['attention_mask'][i:]
+                                        )
+                else:
+                    raise RuntimeError('Last subbatch is larger than expected')
             loss = outputs.loss / n_gradient_acc_steps
             batch_loss += loss.detach().item()
             loss.backward()
+                
 
         if self.clip_norm:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
 
+        
         self.optimizer.step()
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
