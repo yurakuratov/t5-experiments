@@ -73,7 +73,7 @@
     "evaluation_targets": ["valid"],
     "log_every_n_batches": 1000,
     "val_every_n_batches": 5000,
-    "max_batches": 200000,
+    "max_batches": 262144,
     "max_test_batches": -1,
     "metrics": [
       

@@ -190,7 +190,7 @@ class HvdTorchNNTrainer(TorchTrainer):
             metrics = self.metrics
 
         expected_outputs = list(set().union(self._chainer.out_params, *[m.inputs for m in metrics]))
-
+        #print(f"\n\nexpected_outputs = {expected_outputs}\n")
         outputs = {out: [] for out in expected_outputs}
         examples = 0
 
@@ -223,7 +223,9 @@ class HvdTorchNNTrainer(TorchTrainer):
         #     logger.info(f'{k}: {len(v)}')
 
         examples = sum(hvd.allgather_object(examples))
-
+        #print(f"\n\ndp_hvd_trainer: \n\n") #outputs = {outputs}, metric.inputs = {[metric.inputs for metric in metrics]}
+        
+        
         metrics_values = []
         for metric in metrics:
             value = metric.fn(*[outputs[i] for i in metric.inputs])

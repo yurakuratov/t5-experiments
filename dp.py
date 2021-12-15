@@ -214,7 +214,8 @@ class T5Text2TextModel(TorchModel):
                  length_penalty: float = 0.4,
                  sub_batch_size: Optional[int] = None,
                  finetuning_model_config_path: Optional[str] = None,
-                 grad_acc_steps_per_batch: Optional[int] = None, 
+                 grad_acc_steps_per_batch: Optional[int] = None,
+                 print_wm: Optional[str] = None,
                  **kwargs):
         self.pretrained_model = pretrained_model
         self.t5_configs_path = t5_configs_path
@@ -227,7 +228,9 @@ class T5Text2TextModel(TorchModel):
         self.sub_batch_size = sub_batch_size
         self.finetuning_model_config_path = finetuning_model_config_path
         self.grad_acc_steps_per_batch = grad_acc_steps_per_batch
-
+        self.print_wm = print_wm
+        # print(f"\n\nself.print_wm = {self.print_wm}\n\n")
+        # print(f"\n\noptimizer_parameters = {optimizer_parameters}\n\n")
         # super().__init__ calls self.load()
         super().__init__(optimizer=optimizer,
                          optimizer_parameters=optimizer_parameters,
@@ -416,6 +419,9 @@ class T5Text2TextModel(TorchModel):
             sub_batch_size = batch_size // grad_acc_steps_per_batch
 
         predicted_tokens = []
+        predicted_wm = []
+        predicted_tok_types = []
+        tars = []
         with torch.no_grad():
             for i in range(0, batch_size, sub_batch_size):
                 batch_input = {k: _input[k][i: i + sub_batch_size] for k in _input}
@@ -423,13 +429,26 @@ class T5Text2TextModel(TorchModel):
                     self.max_generation_len += self.model.work_mem_size
                     
                 if self.beam_size == 0:
-                    p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len)
+                    if hasattr(self.model, 'work_mem_size'):
+                        p_batch_tokens, p_batch_wm, tar, tok_types = self.model.generate(**batch_input, max_length=self.max_generation_len)
+                    else:
+                        p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len)
                 else:
                     
                     p_batch_tokens = self.model.generate(**batch_input, max_length=self.max_generation_len,
                                                          num_beams=self.beam_size, length_penalty=self.length_penalty)
                 p_batch_tokens = p_batch_tokens.cpu().numpy().tolist()
                 predicted_tokens += p_batch_tokens
+                if hasattr(self.model, 'work_mem_size'):
+                    p_batch_wm = p_batch_wm.cpu().numpy().tolist()
+                    predicted_wm += p_batch_wm
+                    
+                    p_batch_tok_type = tok_types.cpu().numpy().tolist()
+                    predicted_tok_types += p_batch_tok_type
+                    
+                    p_batch_tar = tar.cpu().numpy().tolist()
+                    tars += p_batch_tar
+
 
         # warning: conversion from indices to tokens should be done we the same vocabulary as in pipeline
         # (currently we use only HFT tokenizer)
@@ -437,7 +456,22 @@ class T5Text2TextModel(TorchModel):
         # or just self.tokenizer.decode(tokens, skip_special_tokens=True)?
         predictions = [self.tokenizer.decode(tokens).replace('<pad>', '').replace('</s>', '').strip()
                        for tokens in predicted_tokens]
-
+        if hasattr(self.model, 'work_mem_size'):
+            predictions_tokens = [[self.tokenizer.decode(t).replace('<pad>', '').replace('</s>', '') for t in tokens]
+                       for tokens in predicted_tokens]
+            predictions_wm = [[self.tokenizer.decode([t]) if t != -1 else '-1' for t in tokens] for tokens in predicted_wm]
+            
+            input_texts = [self.tokenizer.decode(i).replace('<pad>', '').replace('</s>', '').strip() for i in _input['input_ids']]
+            
+            if self.print_wm is not None:
+                
+                f = open(self.print_wm, 'a')
+                
+                for inp, pred, tt, wm, tar in zip(input_texts, predictions_tokens, predicted_tok_types, predictions_wm, tars):
+                    seq = ['('* (1 - tt_i) + self.tokenizer.decode([tar_i]) + ')' * (1 - tt_i) if tar_i != -1 else '-1' for tt_i, tar_i in zip(tt, tar)]
+                    f.write(f"input\n{inp}\n\nsequence\n{seq}\n\npreds\n{pred}\n\ntoken_type\n{tt}\n\nwork_mem\n{wm}")
+                    f.write('\n--------------------------------------------------------------------------------------------------------------------------------\n\n')
+                f.close()
         return predictions
 
     @overrides
@@ -514,14 +548,13 @@ def f1_score_with_invalid(y_true, y_predicted) -> float:
     return t5_f1_score_with_invalid(y_true, y_predicted)['f1'] / 100.0
 
 @register_metric('t5_squad_f1')
-def t5_squad_f1(y_true, y_predicted) -> float:
-    # used by qqp, mrpc
-    return t5_squad(y_true, y_predicted)['f1'] / 100.0
+def t5_squad_f1(targets, predictions) -> float:
+    
+    return t5_squad([[i] for i in targets], predictions)['f1'] / 100.0
 
 @register_metric('t5_squad_em')
-def t5_squad_em(y_true, y_predicted) -> float:
-    # used by qqp, mrpc
-    return t5_squad(y_true, y_predicted)['em'] / 100.0
+def t5_squad_em(targets, predictions) -> float:
+    return t5_squad([[i] for i in targets], predictions)['em'] / 100.0
 
 
 @register_metric('t5_bleu')

@@ -2269,6 +2269,171 @@ class T5WMForConditionalGeneration(T5PreTrainedModel):
         return model_kwargs
     
     
+    def greedy_search(
+        self,
+        input_ids: torch.LongTensor,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        **model_kwargs
+    ):
+        r"""
+        Generates sequences for models with a language modeling head using greedy decoding.
+
+        Parameters:
+
+            input_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+                The sequence used as a prompt for the generation. If :obj:`None` the method initializes it as an empty
+                :obj:`torch.LongTensor` of shape :obj:`(1,)`.
+            logits_processor (:obj:`LogitsProcessorList`, `optional`):
+                An instance of :class:`~transformers.LogitsProcessorList`. List of instances of class derived from
+                :class:`~transformers.LogitsProcessor` used to modify the prediction scores of the language modeling
+                head applied at each generation step.
+            max_length (:obj:`int`, `optional`, defaults to 20):
+                The maximum length of the sequence to be generated.
+            pad_token_id (:obj:`int`, `optional`):
+                The id of the `padding` token.
+            eos_token_id (:obj:`int`, `optional`):
+                The id of the `end-of-sequence` token.
+            model_kwargs:
+                Additional model specific keyword arguments will be forwarded to the :obj:`forward` function of the
+                model. If model is an encoder-decoder model the kwargs should include :obj:`encoder_outputs`.
+
+        Return:
+            :obj:`torch.LongTensor` of shape :obj:`(batch_size * num_return_sequences, sequence_length)`: The generated
+            sequences. The second dimension (sequence_length) is either equal to :obj:`max_length` or shorter if all
+            batches finished early due to the :obj:`eos_token_id`.
+
+        Examples::
+
+            >>> from transformers import (
+            ... AutoTokenizer,
+            ... AutoModelForCausalLM,
+            ... LogitsProcessorList,
+            ... MinLengthLogitsProcessor,
+            ... )
+
+            >>> tokenizer = AutoTokenizer.from_pretrained("gpt2")
+            >>> model = AutoModelForCausalLM.from_pretrained("gpt2")
+
+            >>> # set pad_token_id to eos_token_id because GPT2 does not have a EOS token
+            >>> model.config.pad_token_id = model.config.eos_token_id
+
+            >>> input_prompt = "Today is a beautiful day, and"
+            >>> input_ids = tokenizer(input_prompt, return_tensors="pt").input_ids
+
+            >>> # instantiate logits processors
+            >>> logits_processor = LogitsProcessorList([
+            ...     MinLengthLogitsProcessor(15, eos_token_id=model.config.eos_token_id),
+            ... ])
+
+            >>> outputs = model.greedy_search(input_ids, logits_processor=logits_processor)
+
+            >>> print("Generated:", tokenizer.batch_decode(outputs, skip_special_tokens=True))
+        """
+
+        # init values
+        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
+        #here max_length comes with taking work_mem_size in account
+        max_length = max_length if max_length is not None else self.config.max_length
+        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+
+        # init sequence length tensors
+        sequence_lengths, unfinished_sequences, cur_len = self._init_sequence_length_for_generation(
+            input_ids, max_length
+        )
+
+        while cur_len < max_length:
+            # prepare model inputs
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            #print(f"\n\n\ninput_ids = {input_ids}\n\n")
+            # forward pass to get next token
+            outputs = self(**model_inputs, return_dict=True)
+            next_token_logits = outputs.logits[:, -1, :]
+
+
+            # pre-process distribution
+            scores = logits_processor(input_ids, next_token_logits)
+
+            # argmax
+            next_tokens = torch.argmax(scores, dim=-1)
+            
+            # check if current sample token type is wm then do sampling for corresponding logits vector else remain beam searched token untouched
+            def sample_or_greedy_search(x):
+                preds = x[0]
+                token_type = x[1]
+                nucleus_p = x[2]
+                next_tokens = x[3]
+                if token_type == 0:
+                    return self.nucleus_sampling((preds, nucleus_p))
+                else:
+                    return next_tokens
+            
+            
+            tar_greedy_and_nucleus_wm = self.batch_apply(sample_or_greedy_search, 
+                                 M=[outputs.logits[...,-1:,:],
+                                    outputs.token_type[...,-1:],
+                                    torch.full((outputs.token_type.size()[0],), self.nucleus_p, dtype=torch.int64).to('cuda'),
+                                    next_tokens[:, None]
+                                   ],
+                                 dtype=torch.cuda.LongTensor)
+            
+            next_tokens = tar_greedy_and_nucleus_wm.squeeze(-1)
+            #print(f"\n\n\noutputs.token_type[...,-1:] = {outputs.token_type[...,-1:]},\ntar_greedy_and_nucleus_wm = {next_tokens}\nunfinished_sequences = {unfinished_sequences}\n")
+            # add code that transfomers next_tokens to tokens_to_add
+            if eos_token_id is not None:
+                assert pad_token_id is not None, "If eos_token_id is defined, make sure that pad_token_id is defined."
+                next_tokens = next_tokens * unfinished_sequences + (pad_token_id) * (1 - unfinished_sequences)
+
+            # add token and increase length by one
+            # print(f"\n\n\nnext_tokens[:, None] = {next_tokens[:, None]}\n\n")
+            input_ids = torch.cat([input_ids, 
+                                  next_tokens[:, None]
+                                  ], dim=-1)
+            # update sequence length
+            if eos_token_id is not None:
+                eos_token_flags = next_tokens * outputs.token_type[...,-1] + (eos_token_id + 1) * (1 - outputs.token_type[...,-1])
+                sequence_lengths, unfinished_sequences = self._update_seq_length_for_generation(
+                    sequence_lengths, unfinished_sequences, cur_len, eos_token_flags == eos_token_id # next_tokens == eos_token_id
+                )
+                
+            # update model kwargs
+            model_kwargs = self._update_wm_model_kwargs_for_generation(
+                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
+            )
+
+            # stop when there is a </s> in each sentence, or if we exceed the maximul length
+            if unfinished_sequences.max() == 0:
+                break
+
+            # increase cur_len
+            cur_len = cur_len + 1
+
+        
+        def filter_sample_greedy_tokens(x):
+            #here logits and token type are for tokens starting the first after the start token (very first mem tokens and start are discarded)
+            predicted_tokens_sample = x[0]
+            token_type_sample = x[1]
+            tar_seq_len = x[2]
+            filtered = torch.masked_select(predicted_tokens_sample, torch.gt(token_type_sample, 0))[:tar_seq_len]
+            wm = torch.masked_select(predicted_tokens_sample, torch.gt(1. - token_type_sample, 0))
+            return torch.cat([filtered, torch.zeros(tar_seq_len-filtered.size()[0],dtype=torch.int64).to('cuda')],dim=0), torch.cat([wm, torch.full((self.work_mem_size-wm.size()[0],), -1, dtype=torch.int64).to('cuda')],dim=0)
+        # print(f"\n\n\ninput_ids = {input_ids.size()}, model_kwargs[token_type] = {model_kwargs['token_type'].size()}")
+            
+
+        wm_filtered_input_ids, wm = self.batch_apply(filter_sample_greedy_tokens,
+                                M=[input_ids, model_kwargs["token_type"], 
+                                   torch.ones(input_ids.size()[0],dtype=torch.int64).to('cuda') * (max_length - self.work_mem_size)],
+                                dtype=torch.cuda.LongTensor
+                               )
+        ####################################################
+        
+
+        return wm_filtered_input_ids, wm, input_ids, model_kwargs["token_type"]
+
+    
     def beam_search(
         self,
         input_ids: torch.LongTensor,
