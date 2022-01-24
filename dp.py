@@ -1,4 +1,5 @@
 import os
+import functools
 from typing import List, Tuple, Optional, Union, Dict
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from t5.data.mixtures import MixtureRegistry  # noqa: F401 the same with Mixture
 from t5.evaluation.metrics import f1_score_with_invalid as t5_f1_score_with_invalid
 from t5.evaluation.metrics import squad as t5_squad
 from t5.evaluation.metrics import bleu as t5_bleu
+from create_gsm8k_task import test_solve_rate, gsm8k, gsm_dataset_fn
 
 import tensorflow.compat.v1 as tf
 import torch
@@ -65,6 +67,35 @@ t5.data.TaskRegistry.add(
         #t5.seqio.preprocessors.tokenize,
         #t5.seqio.CacheDatasetPlaceholder(),
         #t5.seqio.preprocessors.append_eos_after_trim,
+    ],
+    postprocess_fn=t5.data.postprocessors.qa,
+    metric_fns=[t5.evaluation.metrics.squad],
+    output_features=DEFAULT_OUTPUT_FEATURES)
+
+
+t5.data.TaskRegistry.add(
+    "gsm8k_baseline",
+    # Specify the task type.
+    t5.data.Task,
+    # Supply a function which returns a tf.data.Dataset.
+    dataset_fn=gsm_dataset_fn,
+    splits=["train", "test"],
+    text_preprocessor=[
+        functools.partial(gsm8k, include_context=True),
+    ],
+    postprocess_fn=t5.data.postprocessors.qa,
+    metric_fns=[t5.evaluation.metrics.squad],
+    output_features=DEFAULT_OUTPUT_FEATURES)
+    
+t5.data.TaskRegistry.add(
+    "gsm8k_wm",
+    # Specify the task type.
+    t5.data.Task,
+    # Supply a function which returns a tf.data.Dataset.
+    dataset_fn=gsm_dataset_fn,
+    splits=["train", "test"],
+    text_preprocessor=[
+        functools.partial(gsm8k, include_context=False),
     ],
     postprocess_fn=t5.data.postprocessors.qa,
     metric_fns=[t5.evaluation.metrics.squad],
@@ -560,3 +591,8 @@ def t5_squad_em(targets, predictions) -> float:
 @register_metric('t5_bleu')
 def bleu(y_true, y_predicted) -> float:
     return t5_bleu(y_true, y_predicted)['bleu']
+
+
+@register_metric('t5_tsr')
+def tsr(y_true, y_predicted) -> float:
+    return test_solve_rate(y_true, y_predicted)['tsr']

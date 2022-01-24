@@ -10,11 +10,11 @@ cmd="horovodrun --gloo -np 4 python run_t5_pretraining.py \
         --save_interval 10000 \
         --log_interval 500 \
         --iters 1100000 \
-        --init_checkpoint ./runs/wm_small_span_corruption_128_1100000_steps/model_130000.pth\
+        --init_checkpoint ./runs/wm_small_span_corruption_128_1100000_steps_from_350k/model_660000.pth\
         --data_path ./ThePile/Wikipedia/preprocessed_shards \
-        --model_path ./runs/wm_small_span_corruption_128_1100000_steps \
-        --input_seq_len 128 \
-        --target_seq_len 128 \
+        --model_path ./runs/wm_small_span_corruption_128_1100000_steps_from_660k \
+        --input_seq_len 512 \
+        --target_seq_len 192 \
         --lr 5e-05 \
         --weight_decay 1e-05 \
         --model_cfg ./t5configs/t5-small-wm.json \
