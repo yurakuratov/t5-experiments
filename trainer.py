@@ -246,9 +246,9 @@ class Trainer:
 
     def _skip_n_train_batches(self, n):
         # todo: we can skip directly to n_epoch
-        logger.info(f'Skipping first {n} batches from the dataset...')
         pbar = None
         if hvd.rank() == 0:
+            logger.info(f'Skipping first {n} batches from the dataset...')
             pbar = tqdm(total=n, desc='Skipping...')
 
         i = 0
