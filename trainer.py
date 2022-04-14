@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class Trainer:
     def __init__(self, args, model, optimizer, train_dataloader, valid_dataloader,
-                 train_sampler=None, batch_transform_fn=None, get_metrics_fn=lambda out: {'loss': out['loss']}) -> None:
+                 train_sampler=None, batch_transform_fn=None, get_metrics_fn=lambda _, y: {'loss': y['loss']}) -> None:
         """Implements training loop with horovod multi-gpu & apex fp16 support.
 
         Args:
@@ -122,7 +122,7 @@ class Trainer:
                 subbatch = {k: batch[k][j: j + batch_size] for k in batch}
                 outputs = self.model(**subbatch)
                 loss = outputs['loss']
-                metrics = self.get_metrics_fn(outputs)
+                metrics = self.get_metrics_fn(subbatch, outputs)
 
                 # divide loss on gradient_accumulation_steps to get average loss for sub-batches
                 loss = loss / self.args.gradient_accumulation_steps
@@ -306,8 +306,9 @@ class Trainer:
             logger.info(f'Model was loaded from: {self.args.init_checkpoint}')
             logger.info(f'Start iteration = {self.n_iter}')
             if self.lr_scheduler and self.args.reset_lr:
-                logger.warning(f'lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
-                               f' step (torch.optim.LRScheduler last_epoch parameter) = {self.n_iter}')
+                logger.warning('lr_scheduler is not loaded from the checkpoint. New lr_scheduler is used with starting'
+                               ' step (torch.optim.LRScheduler.__init__ last_epoch parameter) = -1.'
+                               ' Current iteration number is ignored.')
 
     def save(self, save_path, suffix='', metrics=None) -> None:
         if hvd.rank() == 0:
