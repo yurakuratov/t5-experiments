@@ -84,13 +84,18 @@ class Encoder(object):
 
             def get_sentences(text):
                 if isinstance(text, list):
-                    return text
+                    if self.args.split_sentences:
+                        return text
+                    return [''.join(text)]
                 return Encoder.splitter.tokenize(text)
 
             for sentence in get_sentences(text):
                 sentence_ids = Encoder.tokenizer.tokenize(sentence)
                 if len(sentence_ids) > 0:
-                    doc_ids.append(sentence_ids)
+                    if self.args.split_tokens:
+                        doc_ids.extend([[token] for token in sentence_ids])
+                    else:
+                        doc_ids.append(sentence_ids)
             if len(doc_ids) > 0 and self.args.append_eod:
                 doc_ids[-1].append(Encoder.tokenizer.eod)
             ids[key] = doc_ids
@@ -106,6 +111,8 @@ def get_args():
                        help='space separate listed of keys to extract from json')
     group.add_argument('--split-sentences', action='store_true',
                        help='Split documents into sentences.')
+    group.add_argument('--split-tokens', action='store_true',
+                       help='Split documents into tokens. "token == sentence"')
     group.add_argument('--keep-newlines', action='store_true',
                        help='Keep newlines between sentences when splitting.')
 
