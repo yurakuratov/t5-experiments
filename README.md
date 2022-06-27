@@ -10,7 +10,7 @@ T5 and BERT pre-training is implemented in `run_(model_type)_pretraining.py` scr
 
 Training tools, such as Trainer, are in `lm_experiments_tools` package.
 
-## Install requirements
+## Install all requirements
 Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
 ```bash
 grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
@@ -30,10 +30,10 @@ HF interface. Most of the scripts in the repo use Trainer from `lm_experiments_t
 ```bash
 pip install -e .
 ```
-This command will install `lm_experiments_tools` with only required packages for Trainer.
+This command will install `lm_experiments_tools` with only required packages for Trainer and tools.
 
 `lm_experiments_tools` Trainer supports gradient accumulation, logging to tensorboard, saving the best models
-based on metrics, custom metrics support.
+based on metrics, custom metrics and data transformations support.
 
 ###  Install Horovod
 Depending on your setup just `pip install horovod==0.24.2` might work.
