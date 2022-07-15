@@ -26,9 +26,13 @@ class MixtureDataset(torch.utils.data.Dataset):
             resulting in under-/up-sampling from d1, d2, d3.
 
         Args:
-            datasets (List[torch.utils.data.Dataset]): _description_
-            weights (Optional[List[Union[float, int]]], optional): _description_. Defaults to None.
+            datasets (List[torch.utils.data.Dataset]): list of torch Datasets
+            weights (Optional[List[Union[float, int]]], optional): weights of datasets, if weights is None
+                than we just merge all datasets into one. Defaults to None.
         """
+        if weights is None:
+            weights = [1.0] * len(datasets)
+
         self.datasets = datasets
         num_datasets = len(datasets)
         assert num_datasets == len(weights)
