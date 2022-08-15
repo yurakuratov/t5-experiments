@@ -91,6 +91,10 @@ class TrainerArgs:
     clip_grad_value: Optional[float] = field(
         default=None,
         metadata={'help': 'torch.nn.utils.clip_grad_value_ clip_value parameter. (default: None)'})
+    early_stopping_patience: Optional[int] = field(
+        default=None,
+        metadata={'help': 'stop training if `early_stopping_patience` subsequent evalutations did not improve value of '
+                          '`optimize_metric` on validation set (default: None)'})
     # scheduler args
     lr_scheduler: Optional[str] = field(
         default=None,
@@ -199,6 +203,7 @@ class Trainer:
             self.metric_improved_fn = lambda old_m, new_m: old_m > new_m
         else:
             self.metric_improved_fn = lambda old_m, new_m: old_m < new_m
+        self.early_stopping_counter = 0
 
         self.tb = None
         # write tensorboard logs only from rank 0 and if model_path is specified
@@ -505,6 +510,7 @@ class Trainer:
         valid_metric = best_valid_metric
         valid_loss = np.inf
         train_loss = np.inf
+        self.early_stopping_counter = 0
         for batch in train_batches:
             iteration_start = time.time()
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=True)
@@ -550,8 +556,13 @@ class Trainer:
                 valid_metric = valid_metrics[self.args.optimize_metric]
                 if self.metric_improved_fn(best_valid_metric, valid_metric):
                     best_valid_metric = valid_metric
+                    self.early_stopping_counter = 0
+                    self._log_info(f'The best {self.args.optimize_metric} metric was improved to: {best_valid_metric}')
                     if self.args.save_best:
                         self.save(self.args.model_path, suffix='best', metrics=valid_metrics)
+                else:
+                    self.early_stopping_counter += 1
+                    self._log_info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
                 if self.lr_drop_scheduler:
                     self.lr_drop_scheduler.step(valid_metric)
 
@@ -565,6 +576,11 @@ class Trainer:
                                   'valid_loss': f'{valid_loss:.3f}',
                                   f'best_valid_{self.args.optimize_metric}': f'{best_valid_metric:.3f}'
                                   })
+
+            if self.args.early_stopping_patience is not None and \
+                    self.early_stopping_counter > self.args.early_stopping_patience:
+                self._log_info('Early stopping triggered: stopping training...')
+                break
 
         if hvd.rank() == 0:
             # todo: run validation, call save model?
