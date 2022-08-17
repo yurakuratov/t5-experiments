@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from transformers import HfArgumentParser
 
 from lm_experiments_tools import Trainer, TrainerArgs
+from lm_experiments_tools.data import MixtureDataset
 
 load_dotenv()
 
@@ -46,7 +47,8 @@ torch.set_num_threads(2)
 torch.cuda.set_device(hvd.local_rank())
 
 parser = HfArgumentParser(TrainerArgs)
-parser.add_argument('--data_path', type=str, help='path with the indexed data in bin format')
+parser.add_argument('--data_path', type=str, nargs='*', help='path with the indexed data in bin format or multiple '
+                    'paths. Datasets would be merged into single dataset.')
 parser.add_argument('--valid_data_path', type=str, help='path with the indexed data in bin format')
 parser.add_argument('--validate_only', action='store_true', default=False,
                     help='Skip training and run only validation. (default: False)')
@@ -87,6 +89,7 @@ parser.add_argument('--relative_step', action='store_true', default=False,
 parser.add_argument('--warmup_init', action='store_true', default=False,
                     help='Adafactor warmup_init (default: False)')
 
+
 if __name__ == '__main__':
     args = parser.parse_args()
     # set current working dir
@@ -110,17 +113,23 @@ if __name__ == '__main__':
 
     tokenizer = _HFAutoTokenizer(args.tokenizer)
     # get train dataset
-    if hvd.rank() == 0:
-        logger.info(f'preparing training data from: {args.data_path}')
-    data_path = Path(args.data_path).expanduser().absolute()
-    train_data_index = get_indexed_dataset_(str(data_path), args.data_impl, skip_warmup=args.data_skip_warmup)
-
-    train_dataset = BertDataset(indexed_dataset=train_data_index, masked_lm_prob=args.mlm_prob,
-                                short_seq_prob=args.short_seq_prob, binary_head=args.use_nsp, tokenizer=tokenizer,
-                                name=args.data_name, data_prefix=str(data_path),
-                                num_epochs=args.data_n_epochs, max_num_samples=args.data_n_samples,
-                                max_seq_length=args.input_seq_len, mask_label_id=-100, seed=args.seed,
-                                )
+    train_datasets = []
+    for d_path in args.data_path:
+        d_path = Path(d_path).expanduser().absolute()
+        if hvd.rank() == 0:
+            logger.info(f'preparing training data from: {d_path}')
+        train_data_index = get_indexed_dataset_(str(d_path), args.data_impl, skip_warmup=args.data_skip_warmup)
+        train_datasets += [BertDataset(indexed_dataset=train_data_index, masked_lm_prob=args.mlm_prob,
+                                       short_seq_prob=args.short_seq_prob, binary_head=args.use_nsp,
+                                       tokenizer=tokenizer, name=args.data_name, data_prefix=str(d_path),
+                                       num_epochs=args.data_n_epochs, max_num_samples=args.data_n_samples,
+                                       max_seq_length=args.input_seq_len, mask_label_id=-100, seed=args.seed)]
+    if len(train_datasets) > 1:
+        if hvd.rank() == 0:
+            logger.info('building mixture dataset...')
+        train_dataset = MixtureDataset(train_datasets)
+    else:
+        train_dataset = train_datasets[0]
     # shuffle train data each epoch (one loop over train_dataset) & drop last batch
     train_sampler = DistributedSampler(train_dataset, rank=hvd.rank(), num_replicas=hvd.size(), shuffle=True,
                                        drop_last=True, seed=args.seed)
