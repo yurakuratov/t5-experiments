@@ -333,7 +333,9 @@ class Trainer:
                 loss = loss / self.args.gradient_accumulation_steps
                 for k in metrics:
                     metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
-                    batch_metrics[k] += metrics[k].detach().item()
+                    if isinstance(metrics[k], torch.Tensor):
+                        metrics[k] = metrics[k].detach().item()
+                    batch_metrics[k] += metrics[k]
 
                 if self.keep_for_metrics_fn and self.metrics_fn:
                     for k, v in self.keep_for_metrics_fn(subbatch, outputs).items():
