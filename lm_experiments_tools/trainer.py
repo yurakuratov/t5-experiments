@@ -280,14 +280,13 @@ class Trainer:
         Batch is splitted on sub-batches of self.args.batch_size size, loss and gradients are accumulated.
 
         Args:
-            batch (dict): dict with inputs, inputs_mask, targets
+            batch (dict): dict with inputs, inputs_mask, targets, & all the data that is required by model.forward()
             is_train_mode (bool, optional): In train mode we compute gradients, do backprop and optimizer.step().
                 Defaults to True.
 
         Returns:
             float: loss on batch
         """
-        batch_size = self.args.batch_size
         if is_train_mode:
             self.model.train()
             self.optimizer.zero_grad()
@@ -296,16 +295,22 @@ class Trainer:
 
         if self.batch_transform_fn:
             batch = self.batch_transform_fn(batch)
+
+        batch_sizes = []
         for k in batch:
             # filter keys in batch to pass to model only supported arguments
             if k in self.model_forward_args:
                 batch[k] = batch[k].cuda()
+                batch_sizes += [batch[k].size(dim=0)]
+        if not np.all(np.array(batch_sizes) == batch_sizes[0]):
+            raise RuntimeError(f'not all elements in a batch have equal dim 0 size: {batch_sizes}')
+        batch_size = batch_sizes[0]
 
         batch_metrics = defaultdict(lambda: 0.0)
         batch_metrics_data = defaultdict(lambda: [])
         with torch.set_grad_enabled(is_train_mode):
-            for j in range(0, len(batch['input_ids']), batch_size):
-                subbatch = {k: batch[k][j: j + batch_size] for k in batch}
+            for j in range(0, batch_size, self.args.batch_size):
+                subbatch = {k: batch[k][j: j + self.args.batch_size] for k in batch}
                 # filter items from batch that are not used by model forward
                 outputs = self.model(**{k: subbatch[k] for k in subbatch if k in self.model_forward_args})
                 loss = outputs['loss']
@@ -340,7 +345,7 @@ class Trainer:
                             scaled_loss.backward()
                             # last sub-batch, call synchronize within amp.scale_loss scope
                             # mb move to just above with optimizer.skip_synchronize()
-                            if j == (len(batch['input_ids']) // batch_size - 1) * batch_size:
+                            if j == (batch_size // self.args.batch_size - 1) * self.args.batch_size:
                                 self.optimizer.synchronize()
                     else:
                         loss.backward()
