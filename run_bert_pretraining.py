@@ -193,13 +193,14 @@ if __name__ == '__main__':
         optimizer = optimizer_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     def batch_transform_fn(batch):
-        return {
+        b = {
             'input_ids': batch['text'],
             'token_type_ids': batch['types'],
             'attention_mask': batch['padding_mask'],
-            'labels': batch['labels'],
-            'next_sentence_label': batch['is_random'],
-        }
+            'labels': batch['labels']}
+        if args.use_nsp:
+            b['next_sentence_label'] = batch['is_random']
+        return b
 
     def batch_metrics_fn(batch, output):
         # output - result of model(batch) call
@@ -215,6 +216,11 @@ if __name__ == '__main__':
         # which could be too large
         if 'prediction_logits' in output:
             p = output['prediction_logits']
+            y = batch['labels']
+            n = (y != -100).sum()
+            metrics['accuracy_mlm'] = (torch.argmax(p, dim=-1) == y).sum() / n if n != 0 else torch.tensor(0.0)
+        if 'logits' in output and args.use_nsp == 0:
+            p = output['logits']
             y = batch['labels']
             n = (y != -100).sum()
             metrics['accuracy_mlm'] = (torch.argmax(p, dim=-1) == y).sum() / n if n != 0 else torch.tensor(0.0)
