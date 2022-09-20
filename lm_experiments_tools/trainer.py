@@ -13,7 +13,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from transformers.optimization import get_scheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import horovod.torch as hvd
 
 from lm_experiments_tools.utils import rank_0
@@ -297,6 +297,7 @@ class Trainer:
         if self.batch_transform_fn:
             batch = self.batch_transform_fn(batch)
         for k in batch:
+            # filter keys in batch to pass to model only supported arguments
             if k in self.model_forward_args:
                 batch[k] = batch[k].cuda()
 
@@ -485,10 +486,8 @@ class Trainer:
         return metrics
 
     def train(self) -> None:
-        pbar = None
-        if hvd.rank() == 0:
-            pbar = tqdm(total=self.args.iters, desc='Train')
-            pbar.update(self.n_iter)
+        pbar = tqdm(total=self.args.iters, desc='Train', disable=(hvd.rank() != 0))
+        pbar.update(self.n_iter)
 
         train_batches = self._train_batch_generator()
 
@@ -570,33 +569,40 @@ class Trainer:
             if self.args.save_interval and self.n_iter % self.args.save_interval == 0:
                 self.save(self.args.model_path)
 
-            if hvd.rank() == 0:
-                pbar.update(1)
-                pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
-                                  'valid_loss': f'{valid_loss:.3f}',
-                                  f'best_valid_{self.args.optimize_metric}': f'{best_valid_metric:.3f}'
-                                  })
+            pbar.update(1)
+            pbar.set_postfix({'train_loss': f'{train_loss:.3f}',
+                              'valid_loss': f'{valid_loss:.3f}',
+                              f'best_valid_{self.args.optimize_metric}': f'{best_valid_metric:.3f}'
+                              })
 
             if self.args.early_stopping_patience is not None and \
                     self.early_stopping_counter > self.args.early_stopping_patience:
                 self._log_info('Early stopping triggered: stopping training...')
                 break
 
-        if hvd.rank() == 0:
-            # todo: run validation, call save model?
-            pbar.close()
+        pbar.close()
         self._log_info('Done!')
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
         self._log_info(f'start validation at step {self.n_iter}')
-
         self._reset_batch_metrics('valid')
         self._reset_metrics_data('valid')
-        for batch in tqdm(dataloader, desc='Validation', disable=(hvd.rank() != 0)):
+
+        n_valid_batches = None
+        try:
+            n_valid_batches = len(dataloader)
+        except TypeError:
+            # in case if dataset has no len() method (IterableDataset?)
+            n_valid_batches = None
+
+        pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(hvd.rank() != 0))
+        for batch in dataloader:
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
             self._add_batch_metrics(batch_metrics, split='valid')
             if self.keep_for_metrics_fn and self.metrics_fn:
                 self._add_metrics_data(batch_metrics_data, split='valid')
+            pbar.update()
+        pbar.close()
 
         metrics = self.collect_metrics(split='valid')
         if hvd.rank() == 0:
