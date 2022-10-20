@@ -582,9 +582,10 @@ class Trainer:
                 else:
                     self.early_stopping_counter += 1
                     self._log_info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
-                self.tb.add_scalar('patience/iterations', self.early_stopping_counter, self.n_iter)
-                self.tb.add_scalar('patience/samples', self.early_stopping_counter,
-                                   self.n_iter * self.global_batch_size)
+                if hvd.rank() == 0 and self.tb:
+                    self.tb.add_scalar('patience/iterations', self.early_stopping_counter, self.n_iter)
+                    self.tb.add_scalar('patience/samples', self.early_stopping_counter,
+                                        self.n_iter * self.global_batch_size)
                 if self.lr_drop_scheduler:
                     self.lr_drop_scheduler.step(valid_metric)
 
