@@ -669,9 +669,9 @@ class Trainer:
     def save(self, save_path, suffix='', metrics=None) -> None:
         if save_path is not None:
             if suffix == '':
-                save_path = f'{self.args.model_path}/model_{self.n_iter}.pth'
+                save_path = f'{save_path}/model_{self.n_iter}.pth'
             else:
-                save_path = f'{self.args.model_path}/model_{suffix}.pth'
+                save_path = f'{save_path}/model_{suffix}.pth'
             to_save = {
                        "model_state_dict": self.model.state_dict(),
                        "optimizer_state_dict": self.optimizer.state_dict(),
