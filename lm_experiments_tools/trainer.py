@@ -434,19 +434,16 @@ class Trainer:
 
     def _reset_batch_metrics(self, split=None):
         if split is None:
-            self.batch_metrics = {}
-            self.batch_metrics['train'] = defaultdict(lambda: [])
-            self.batch_metrics['valid'] = defaultdict(lambda: [])
+            # e.g., self.batch_metrics['train']['metric_name'] is a list of metric values
+            self.batch_metrics = defaultdict(lambda: defaultdict(list))
         else:
-            self.batch_metrics[split] = defaultdict(lambda: [])
+            self.batch_metrics[split] = defaultdict(list)
 
     def _reset_metrics_data(self, split=None):
         if split is None:
-            self.metrics_data = {}
-            self.metrics_data['train'] = defaultdict(lambda: [])
-            self.metrics_data['valid'] = defaultdict(lambda: [])
+            self.metrics_data = defaultdict(lambda: defaultdict(list))
         else:
-            self.metrics_data[split] = defaultdict(lambda: [])
+            self.metrics_data[split] = defaultdict(list)
 
     @staticmethod
     @rank_0
@@ -608,8 +605,8 @@ class Trainer:
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
         self._log_info(f'start validation at step {self.n_iter}')
-        self._reset_batch_metrics('valid')
-        self._reset_metrics_data('valid')
+        self._reset_batch_metrics(split)
+        self._reset_metrics_data(split)
 
         n_valid_batches = None
         try:
@@ -621,13 +618,13 @@ class Trainer:
         pbar = tqdm(total=n_valid_batches, desc='Validation', disable=(hvd.rank() != 0))
         for batch in dataloader:
             batch_metrics, batch_metrics_data = self.step(batch, is_train_mode=False)
-            self._add_batch_metrics(batch_metrics, split='valid')
+            self._add_batch_metrics(batch_metrics, split=split)
             if self.keep_for_metrics_fn and self.metrics_fn:
-                self._add_metrics_data(batch_metrics_data, split='valid')
+                self._add_metrics_data(batch_metrics_data, split=split)
             pbar.update()
         pbar.close()
 
-        metrics = self.collect_metrics(split='valid')
+        metrics = self.collect_metrics(split=split)
         if hvd.rank() == 0:
             # todo: separate logging from validation/training
             for k in metrics:
