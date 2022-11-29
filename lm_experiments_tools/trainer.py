@@ -343,11 +343,13 @@ class Trainer:
 
                 if is_train_mode:
                     if self.args.fp16:
-                        with self.amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                        is_last_batch = (j == (batch_size // self.args.batch_size - 1) * self.args.batch_size)
+                        # delay unscale allows not to run self.optimizer.synchronize() for every subbatch
+                        # which leads to performance improvements when many grad_acc_steps are performed
+                        # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                        with self.amp.scale_loss(loss, self.optimizer, delay_unscale=not is_last_batch) as scaled_loss:
                             scaled_loss.backward()
-                            # last sub-batch, call synchronize within amp.scale_loss scope
-                            # mb move to just above with optimizer.skip_synchronize()
-                            if j == (batch_size // self.args.batch_size - 1) * self.args.batch_size:
+                            if is_last_batch:
                                 self.optimizer.synchronize()
                     else:
                         loss.backward()
