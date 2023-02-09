@@ -361,7 +361,7 @@ class Trainer:
                         outputs['generation_outputs'] = generation_outputs
 
                 metrics = self.batch_metrics_fn(subbatch, outputs)
-                
+
                 for k in metrics:
                     metrics[k] = metrics[k] / self.args.gradient_accumulation_steps
                     if isinstance(metrics[k], torch.Tensor):
