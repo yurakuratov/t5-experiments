@@ -727,11 +727,10 @@ class Trainer:
             else:
                 save_path = f'{save_path}/model_{suffix}.pth'
             to_save = {
-                       "model_state_dict": self.model.state_dict(),
-                       "optimizer_state_dict": self.optimizer.state_dict(),
-                       "iteration": self.n_iter,
-                       "epoch": self.n_epoch,
-                       }
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "iteration": self.n_iter,
+                "epoch": self.n_epoch}
             if metrics:
                 to_save['metrics'] = metrics
             if self.use_apex_amp:
