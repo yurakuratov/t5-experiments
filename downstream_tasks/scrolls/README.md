@@ -23,8 +23,43 @@ example scripts with grid search: `finetune_contract_nli_encoder.sh` & `finetune
 CUDA_VISIBLE_DEVICES=0,1 NP=2 ./finetune_contract_nli.sh
 ```
 
+Results and the best performing hyperparameters (3 runs per set of hparams):
+| model           | input_seq_len | EM (valid)    | bs  | lr    | optimizer | scheduler | wd    | steps | patience |
+| --------------- | ------------- | ------------- | --- | ----- | --------- | --------- | ----- | ----- | -------- |
+| bert-base-cased | 256           | 70.42 +- 0.44 | 32  | 2e-05 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| bert-base-cased | 512           | 71.93 +- 0.40 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| roberta-base    | 256           | 71.74 +- 0.40 | 32  | 2e-05 | AdamW     | constant  | 1e-03 | 9000  | 15       |
+| roberta-base    | 512           | 74.41 +- 0.39 | 32  | 2e-05 | AdamW     | constant  | 1e-03 | 9000  | 15       |
+| deberta-v3-base | 256           | 71.55 +- 0.48 | 32  | 2e-05 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| deberta-v3-base | 512           | 74.57 +- 0.42 | 32  | 2e-05 | AdamW     | constant  | 1e-03 | 9000  | 15       |
+| bart-base       | 256           | 71.48 +- 0.79 | 32  | 2e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| bart-base       | 512           | 74.31 +- 0.22 | 32  | 2e-05 | AdamW     | constant  | 1e-03 | 9000  | 15       |
+| bart-base       | 1024          | 77.23 +- 0.40 | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| t5-base         | 256           | TBD           | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| t5-base         | 512           | TBD           | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| t5-base         | 1024          | TBD           | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+
+`constant` lr scheduler is `constant_with_warmup` from [HF](https://huggingface.co/docs/transformers/main_classes/optimizer_schedules#schedules). The full set of hyperparameters could be found in `./finetune_contract_nli_encoder.sh` and `run_finetuning_scrolls.py`.
+
 ### QuALITY
-script: `finetune_quality.sh`
+script:
+```bash
+CUDA_VISIBLE_DEVICES=0,1 NP=2 ./finetune_quality.sh
+```
+
+Results and the best performing hyperparameters (3 runs per set of hparams):
+
+| model              | input_seq_len | EM (valid)    | bs  | lr    | optimizer | scheduler | wd    | steps | patience |
+| ------------------ | ------------- | ------------- | --- | ----- | --------- | --------- | ----- | ----- | -------- |
+| facebook/bart-base | 256           | 32.18 +- 0.47 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 3200  | 10       |
+| facebook/bart-base | 512           | 32.22 +- 0.44 | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 3200  | 10       |
+| facebook/bart-base | 1024          | 32.15 +- 0.60 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 3200  | 10       |
+| t5-base            | 256           | 33.06 +- 0.65 | 32  | 2e-04 | AdamW     | constant  | 1e-03 | 3200  | 10       |
+| t5-base            | 512           | 32.76 +- 0.06 | 32  | 2e-04 | AdamW     | linear    | 1e-03 | 3200  | 10       |
+| t5-base            | 1024          | 33.86 +- 1.22 | 32  | 3e-04 | AdamW     | constant  | 1e-03 | 3200  | 10       |
+
+Check `./finetune_quality.sh` and `run_finetuning_scrolls.py` for other training details.
+
 
 ### Qasper
 script: `finetune_qasper.sh`
