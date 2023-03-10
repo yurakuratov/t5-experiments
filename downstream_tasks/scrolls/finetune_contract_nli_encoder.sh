@@ -6,9 +6,9 @@ cd ../..
 CUBLAS_WORKSPACE_CONFIG=:4096:2
 CUDA_LAUNCH_BLOCKING=1
 
-MODEL_NAMES=(bert-base-cased roberta-base microsoft/deberta-v3-base google/electra-base-discriminator)
+MODEL_NAMES=(bert-base-cased roberta-base microsoft/deberta-v3-base)
 MODEL_TYPE=encoder
-MODEL_CLSS=(Bert Roberta DebertaV2 Electra)
+MODEL_CLSS=(Bert Roberta DebertaV2)
 TASK_NAME=contract_nli
 
 # SCROLLS TASKS (train/valid/test)
@@ -21,20 +21,21 @@ TASK_NAME=contract_nli
 # contract_nli (7191/1037/2091) 20ep ~4500 iters with bs 32
 
 TBS=32 # total batch size
-BS=16 # batch size per gpu, * grad_acc_steps
+BS=8 # batch size per gpu, * grad_acc_steps
 WD=1e-03
 
 TGT_LEN=1024
 METRIC=exact_match
 ITERS=9000
+PATIENCE=15
 
 for (( i=0; i<${#MODEL_NAMES[@]}; i++ ))
 do
 MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
-for SRC_LEN in 256 512
+for SRC_LEN in 512 256
 do
-for LR in 2e-04 1e-04 5e-05 2e-05
+for LR in 1e-04 5e-05 2e-05
 do
 for SCHEDULER in linear constant_with_warmup
 do
@@ -56,9 +57,10 @@ horovodrun --gloo -np $NP python -m downstream_tasks.scrolls.run_finetuning_scro
         --lr ${LR} --lr_scheduler $SCHEDULER --num_warmup_steps $(($ITERS/10)) \
         --data_n_workers 2 \
         --log_interval $(($ITERS/40)) --valid_interval $(($ITERS/40)) \
-        --optimize_metric $METRIC --optimize_mode max --early_stopping_patience 10 \
+        --optimize_metric $METRIC --optimize_mode max --early_stopping_patience $PATIENCE \
         --save_best \
         --seed $(($N+42))
+# find $MODEL_PATH | grep .pth | xargs -l rm -rf
 done
 done
 done
