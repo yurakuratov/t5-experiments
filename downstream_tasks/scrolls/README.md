@@ -35,9 +35,9 @@ Results and the best performing hyperparameters (3 runs per set of hparams):
 | bart-base       | 256           | 71.48 +- 0.79 | 32  | 2e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
 | bart-base       | 512           | 74.31 +- 0.22 | 32  | 2e-05 | AdamW     | constant  | 1e-03 | 9000  | 15       |
 | bart-base       | 1024          | 77.23 +- 0.40 | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
-| t5-base         | 256           | TBD           | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
-| t5-base         | 512           | TBD           | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
-| t5-base         | 1024          | TBD           | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| t5-base         | 256           | 72.16 +-0.19  | 32  | 2e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| t5-base         | 512           | 74.37 +- 0.48 | 32  | 3e-04 | AdamW     | linear    | 1e-03 | 9000  | 15       |
+| t5-base         | 1024          | 79.58 +- 0.19 | 32  | 5e-05 | AdamW     | constant  | 1e-03 | 9000  | 15       |
 
 `constant` lr scheduler is `constant_with_warmup` from [HF](https://huggingface.co/docs/transformers/main_classes/optimizer_schedules#schedules). The full set of hyperparameters could be found in `./finetune_contract_nli_encoder.sh` and `run_finetuning_scrolls.py`.
 

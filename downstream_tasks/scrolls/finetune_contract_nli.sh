@@ -34,7 +34,7 @@ MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
 for SRC_LEN in 256 512 1024
 do
-for LR in 2e-04 1e-04 5e-05 2e-05
+for LR in 3e-04 2e-04 1e-04 5e-05 2e-05
 do
 for SCHEDULER in linear constant_with_warmup
 do
@@ -61,6 +61,7 @@ horovodrun --gloo -np $NP python -m downstream_tasks.scrolls.run_finetuning_scro
         --optimize_metric $METRIC --optimize_mode max --early_stopping_patience 10 \
         --save_best \
         --seed $(($N+42))
+# find $MODEL_PATH | grep .pth | xargs -l rm -rf
 done
 done
 done
