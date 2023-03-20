@@ -51,12 +51,12 @@ Results and the best performing hyperparameters (3 runs per set of hparams):
 
 | model              | input_seq_len | EM (valid)    | bs  | lr    | optimizer | scheduler | wd    | steps | patience |
 | ------------------ | ------------- | ------------- | --- | ----- | --------- | --------- | ----- | ----- | -------- |
-| facebook/bart-base | 256           | 32.18 +- 0.47 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 3200  | 10       |
-| facebook/bart-base | 512           | 32.22 +- 0.44 | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 3200  | 10       |
-| facebook/bart-base | 1024          | 32.15 +- 0.60 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 3200  | 10       |
-| t5-base            | 256           | 33.06 +- 0.65 | 32  | 2e-04 | AdamW     | constant  | 1e-03 | 3200  | 10       |
-| t5-base            | 512           | 32.76 +- 0.06 | 32  | 2e-04 | AdamW     | linear    | 1e-03 | 3200  | 10       |
-| t5-base            | 1024          | 33.86 +- 1.22 | 32  | 3e-04 | AdamW     | constant  | 1e-03 | 3200  | 10       |
+| facebook/bart-base | 256           | 32.90 +- 0.39 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 6400  | 10       |
+| facebook/bart-base | 512           | 32.95 +- 0.53 | 32  | 1e-04 | AdamW     | linear    | 1e-03 | 6400  | 10       |
+| facebook/bart-base | 1024          | 32.63 +- 0.63 | 32  | 2e-05 | AdamW     | linear    | 1e-03 | 6400  | 10       |
+| t5-base            | 256           | 33.45 +- 0.51 | 32  | 3e-04 | AdamW     | linear    | 1e-03 | 6400  | 10       |
+| t5-base            | 512           | 33.54 +- 0.26 | 32  | 5e-05 | AdamW     | constant  | 1e-03 | 6400  | 10       |
+| t5-base            | 1024          | 33.68 +- 0.67 | 32  | 2e-04 | AdamW     | linear    | 1e-03 | 6400  | 10       |
 
 Check `./finetune_quality.sh` and `run_finetuning_scrolls.py` for other training details.
 

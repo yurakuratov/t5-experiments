@@ -26,9 +26,9 @@ WD=1e-03
 
 TGT_LEN=1024
 METRIC=exact_match
-ITERS=3200
+ITERS=6400
 
-# 2e-04 1e-04 5e-05 2e-05
+# for bart large lrs 3e-04 2e-04 could be dropped as they lead to bad results
 
 for (( i=0; i<${#MODEL_NAMES[@]}; i++ ))
 do
