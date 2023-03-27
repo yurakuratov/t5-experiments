@@ -62,7 +62,21 @@ Check `./finetune_quality.sh` and `run_finetuning_scrolls.py` for other training
 
 
 ### Qasper
-script: `finetune_qasper.sh`
+script with full set of hyperparameters (it is not necessary to run all of them, choose hyperparamters by your needs):
+```bash
+CUDA_VISIBLE_DEVICES=0,1 NP=2 ./finetune_qasper.sh
+```
+
+Results and the best performing hyperparameters (3 runs per set of hparams):
+
+| model              | input_seq_len | F1 (valid)    | bs  | lr    | optimizer | scheduler | wd    | steps | patience |
+| ------------------ | ------------- | ------------- | --- | ----- | --------- | --------- | ----- | ----- | -------- |
+| facebook/bart-base | 256           | 18.75 +- 0.48 | 32  | 2e-05 | AdamW     | constant  | 1e-03 | 3200  | 15       |
+| facebook/bart-base | 512           | 20.97 +- 0.33 | 32  | 2e-05 | AdamW     | linear    | 1e-03 | 3200  | 15       |
+| facebook/bart-base | 1024          | 22.76 +- 0.27 | 32  | 2e-05 | AdamW     | linear    | 1e-03 | 3200  | 15       |
+| t5-base            | 256           | 17.80 +- 0.22 | 32  | 2e-04 | AdamW     | constant  | 1e-03 | 3200  | 15       |
+| t5-base            | 512           | 19.89 +- 0.31 | 32  | 3e-04 | AdamW     | constant  | 1e-03 | 3200  | 15       |
+| t5-base            | 1024          | 24.16 +- 0.12 | 32  | 5e-05 | AdamW     | linear    | 1e-03 | 6400  | 15       |
 
 
 > TODO: report the best set of params and scores
