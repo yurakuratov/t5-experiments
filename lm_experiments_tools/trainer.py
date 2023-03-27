@@ -1,5 +1,6 @@
 import importlib
 import itertools
+import json
 import logging
 import time
 from collections import defaultdict
@@ -297,8 +298,12 @@ class Trainer:
 
         self.n_iter = 0
         self.n_epoch = 0
+        # self.batch_metrics keeps per-batch metrics for all batches in log_interval
         self._reset_batch_metrics()
+        # self.metrics_data stores all intermediate batches data (in log_interval) to be used lately to compute metrics
         self._reset_metrics_data()
+        # self.metrics keeps the last logged metrics
+        self._reset_metrics()
         if self.args.init_checkpoint:
             self.load(args.init_checkpoint, self.args.reset_optimizer, self.args.reset_lr, self.args.reset_iteration)
 
@@ -488,6 +493,12 @@ class Trainer:
         else:
             self.metrics_data[split] = defaultdict(list)
 
+    def _reset_metrics(self, split=None):
+        if split is None:
+            self.metrics = dict()
+        else:
+            del self.metrics[split]
+
     @staticmethod
     @rank_0
     def _log_info(msg, *args, **kwargs):
@@ -553,6 +564,7 @@ class Trainer:
             metrics.update(m)
         self._reset_batch_metrics(split)
         self._reset_metrics_data(split)
+        self.metrics[split] = metrics
         return metrics
 
     def train(self) -> None:
@@ -635,7 +647,7 @@ class Trainer:
                     self.early_stopping_counter = 0
                     self._log_info(f'The best {self.args.optimize_metric} metric was improved to: {best_valid_metric}')
                     if self.args.save_best:
-                        self.save(self.args.model_path, suffix='best', metrics=valid_metrics)
+                        self.save(self.args.model_path, suffix='best')
                 else:
                     self.early_stopping_counter += 1
                     self._log_info(f'Metric was not improved for the last #{self.early_stopping_counter} evaluations')
@@ -731,19 +743,18 @@ class Trainer:
             self._log_info('Optimizer is not loaded from the checkpoint. New optimizer is created.')
 
     @rank_0
-    def save(self, save_path, suffix='', metrics=None) -> None:
+    def save(self, save_path, suffix='') -> None:
         if save_path is not None:
             if suffix == '':
                 save_path = f'{save_path}/model_{self.n_iter}.pth'
             else:
                 save_path = f'{save_path}/model_{suffix}.pth'
             to_save = {
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "iteration": self.n_iter,
-                "epoch": self.n_epoch}
-            if metrics:
-                to_save['metrics'] = metrics
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'iteration': self.n_iter,
+                'epoch': self.n_epoch,
+                'metrics': self.metrics}
             if self.use_apex_amp:
                 to_save['amp'] = self.amp.state_dict()
             if self.use_torch_amp:
@@ -752,3 +763,26 @@ class Trainer:
                 to_save['lr_scheduler_state_dict'] = self.lr_scheduler.state_dict()
             torch.save(to_save, save_path)
             self._log_info(f'Model was saved to {save_path}')
+
+    @rank_0
+    def save_metrics(self, save_path) -> None:
+        """Saves all metrics into metrics.json
+        After trainer.train(...) you might want to load the best checkpoint and validate it on some test sets, e.g.:
+            trainer.validate(valid, split='valid')
+            trainer.validate(test_1, split='test_1')
+            trainer.validate(test_2, split='test_2')
+        and save metrics into a file, e.g.:
+            trainer.save_metrics(save_path=args.model_path)
+        """
+        if save_path is not None:
+            save_path = f'{save_path}/metrics.json'
+            for split in self.metrics:
+                for k in self.metrics[split]:
+                    if isinstance(self.metrics[split][k], torch.Tensor):
+                        self.metrics[split][k] = self.metrics[split][k].numpy().tolist()
+                    if isinstance(self.metrics[split][k], np.ndarray):
+                        self.metrics[split][k] = self.metrics[split][k].tolist()
+            try:
+                json.dump(self.metrics, open(save_path, 'w'), indent=4)
+            except TypeError as e:
+                self._log_warning(f'Unable to save metrics: {e}.\nmetrics: {self.metrics}')
