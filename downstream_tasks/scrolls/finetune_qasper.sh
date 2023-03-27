@@ -21,7 +21,7 @@ TASK_NAME=qasper
 # contract_nli (7191/1037/2091) 20ep ~4500 iters with bs 32
 
 TBS=32 # total batch size
-BS=16 # batch size per gpu, * grad_acc_steps
+BS=8 # batch size per gpu, * grad_acc_steps
 WD=1e-03
 
 TGT_LEN=1024
@@ -34,7 +34,9 @@ MODEL_NAME=${MODEL_NAMES[i]}
 MODEL_CLS=${MODEL_CLSS[i]}
 for SRC_LEN in 256 512 1024
 do
-for LR in 2e-04 1e-04 5e-05 2e-05
+for ITERS in 3200 6400
+do
+for LR in 3e-04 2e-04 1e-04 5e-05 2e-05
 do
 for SCHEDULER in linear constant_with_warmup
 do
@@ -61,6 +63,8 @@ horovodrun --gloo -np $NP python -m downstream_tasks.scrolls.run_finetuning_scro
         --optimize_metric $METRIC --optimize_mode max --early_stopping_patience 15 \
         --save_best \
         --seed $(($N+42))
+# find $MODEL_PATH | grep .pth | xargs -l rm -rf
+done
 done
 done
 done
