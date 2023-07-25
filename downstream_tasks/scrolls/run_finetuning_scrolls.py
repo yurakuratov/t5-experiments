@@ -312,6 +312,8 @@ def main():
             if hvd.rank() == 0:
                 logger.info('Runnning validation on valid data:')
             trainer.validate(valid_dataloader, write_tb=False)
+        # save train/valid/test metrics into metrics.json
+        trainer.save_metrics(save_path=args.model_path)
     else:
         # run validation, do not write to tensorboard
         if hvd.rank() == 0:
