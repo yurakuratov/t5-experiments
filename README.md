@@ -78,6 +78,14 @@ resources (unordered):
 
 ### Install DeepSpeed
 DeepSpeed Sparse attention supports only GPUs with compute compatibility >= 7 (V100, T4, A100), CUDA 10.1, 10.2, 11.0, or 11.1 and runs only in FP16 mode (as of DeepSpeed 0.6.0).
+
+PyTorch>=1.7.1,<=1.10.1 wheels with CUDA 10.2/11.0/11.1 from [pytorch.org](https://pytorch.org/get-started/previous-versions/) can be used.
+However, using Sparse Ops with CUDA 11.1 PyTorch wheels would require CUDA 11.3/11.4 to be installed on the system.
+Sparse Ops could also be used with PyTorch==1.12.1 CUDA 11.3 wheels, but running DeepSpeed Sparse Ops tests would require modifying them as they check for Torch CUDA version <=11.1.
+DeepSpeed fork for Triton 1.1.1 already has updated tests.
+
+Triton 1.0.0 and 1.1.1 requires python<=3.9.
+
 ```bash
 pip install triton==1.0.0
 DS_BUILD_SPARSE_ATTN=1 pip install deepspeed==0.6.0 --global-option="build_ext" --global-option="-j8" --no-cache
@@ -86,7 +94,7 @@ and check installation with
 ```bash
 ds_report
 ```
-#### Triron 1.1.1
+#### Triton 1.1.1
 Triton 1.1.1 brings x2 speed-up to sparse operations on A100, but DeepSpeed (0.6.5) currently supports only triton 1.0.0.
 DeepSpeed fork with triton 1.1.1 support could be used in the cases where such speed-up is needed:
 ```bash
