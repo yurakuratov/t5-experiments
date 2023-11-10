@@ -673,7 +673,10 @@ class Trainer:
                 self._log_info('Early stopping triggered: stopping training...')
                 break
 
+        # clean-up
         pbar.close()
+        if hvd.rank() == 0 and self.tb:
+            self.tb.flush()
         self._log_info('Done!')
 
     def validate(self, dataloader, split='valid', write_tb=True) -> Dict[str, float]:
@@ -705,6 +708,9 @@ class Trainer:
                 if self.tb and write_tb:
                     self.tb.add_scalar(f'{k}/iterations/{split}', metrics[k], self.n_iter)
                     self.tb.add_scalar(f'{k}/samples/{split}', metrics[k], self.n_iter * self.global_batch_size)
+            if self.tb and write_tb:
+                self.tb.flush()
+
         return metrics
 
     def load(self, load_path, reset_optimizer=False, reset_lr=False, reset_iteration=False) -> None:
