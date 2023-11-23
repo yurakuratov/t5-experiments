@@ -165,7 +165,7 @@ SparseAttention parameters are passed to the model with HF model configuration f
   "num_random_blocks": 1
 }
 ```
-You can also check `bert_base_uncased-4L_sparse.json` config example in `bert_configs` folder.
+You can also check `bert_base_uncased-4L_sparse.json` config example in `models_configs/bert_configs` folder.
 
 ## T5 Pre-training
 ### T5-small baseline
@@ -182,7 +182,7 @@ export CUDA_VISIBLE_DEVICES=4,5; horovodrun --gloo -np 2 python run_t5_pretraini
         --target_seq_len 192 \
         --lr 5e-05 \
         --weight_decay 1e-05 \
-        --model_cfg ./t5configs/t5-small.json \
+        --model_cfg ./models_configs/t5_configs/t5-small.json \
         --model_cls modeling_t5:T5ForConditionalGeneration
 ```
 
@@ -201,87 +201,6 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3; horovodrun --gloo -np 4 python run_t5_pretr
         --lr 5e-05 \
         --weight_decay 1e-05 \
         --model_cls modeling_t5:T5ForConditionalGeneration \
-        --model_cfg t5configs/t5-base-only-cdQ.json \
+        --model_cfg models_configs/t5_configs/t5-base-only-cdQ.json \
         --init_checkpoint ./runs/base_wiki_enc_only_cdq_fixed_pos_wo_tanh/model_150000.pth
-```
-
-## T5 Fine-tuning with DeepPavlov
-`python -m deeppavlov train config_name`
-
-Gradient accumulation for `dp:T5Text2TextModel`, e.g.:
-- `batch_size`: 32
-- `sub_batch_size`: 16
-
-means that full batch of size `batch_size` will be splited on two sub-batches of size `sub_batch_size` to accumulate their gradients.
-
-### Fine-tuning on GLUE
-Base configuration files are at `./dp_configs/glue`
-
-Fine-tuning and evaluation could be done with command:
-```bash
-export CUDA_VISIBLE_DEVICES=6; python evaluate_model.py single \
-        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
-        --task-config ./dp_configs/glue \
-        --suffix bs_32/run_0 \
-        --train-batch-size 32
-```
-`pretrained-checkpoint` is a path to pretrained checkpoint that would be trained and evaluated, `task-config` is a
-folder with DP configs (or single DP config), `suffix` would be appended to a model path. Check `evaluate_model.py` for
-more details.
-
-#### GLUE mixture from T5
-config: `./dp_configs/glue/glue_mixture.json`
-
-Use `save_every_n_batches` parameter to save the model, set `metrics: []` and `evaluation_targets: []` in DP configs.
-
-Train model on datasets mixture, check all available options in `evaluate_model.py:train_mixture()`:
-```bash
-export CUDA_VISIBLE_DEVICES=1; python evaluate_model.py train-mixture \
-        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
-        --task-config ./dp_configs/glue/glue_mixture.json  \
-        --suffix bs_128 \
-        --train-batch-size 128
-```
-
-Evaluation for all checkpoints in `checkpoint` folder, saves best checkpoints and evaluation results:
-```bash
-export CUDA_VISIBLE_DEVICES=0; python evaluate_model.py mixture \
-        --checkpoint ./runs/small_wiki_bs_128/glue/mixture/bs_128/ \
-        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
-        --task-config ./dp_configs/glue \
-        --save-best
-```
-
-#### Collecting results
-To get the best scores for all fine-tuned models and tasks run:
-```bash
-python evaluate_model.py collect-metrics \
-        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth --clean > report.txt
-```
-use `--clean` option to delete all models checkpoints except the best ones for each task.
-
-### Prepare submission for GLUE Leaderboard:
-**TBD**
-
-#### QQP
-QQP is currently not available via tfds: https://github.com/tensorflow/datasets/pull/3031
-
-to hot-fix this go to the source code of installed tfds `tensorflow_datasets/text/glue.py:215` and replace QQP data url with https://dl.fbaipublicfiles.com/glue/data/QQP.zip
-
-### Fine-tuning on WMT
-WMT configs could be found in `./dp_configs/wmt`
-
-Training with Horovod+DeepPavlov:
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; horovodrun --gloo -np 8 python -m deeppavlov train ./dp_configs/ende_hvd.json
-```
-
-Multi-gpu training and evaluating with `evaluate_model.py` (recommended):
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7; python evaluate_model.py single \
-        --pretrained-checkpoint ./runs/small_wiki_bs_128/model_1100000.pth \
-        --task-config ./dp_configs/wmt/ende.json \
-        --suffix bs_128_hvd/run_0 \
-        --train-batch-size 16 \
-        --lr 5e-05
 ```

@@ -4,7 +4,7 @@ cd ..
 
 horovodrun --gloo -np $NP python run_t5_pretraining.py \
 --data_path ./data/toy_wiki/train/ --valid_data_path ./data/toy_wiki/valid/ \
---model_cfg ./t5configs/t5-micro.json \
+--model_cfg ./models_configs/t5_configs/t5-micro.json \
 --model_cls modeling_t5:T5ForConditionalGeneration \
 --model_path ./tests/runs/test_t5_pretrain \
 --batch_size 16 --gradient_accumulation_steps 2 \
