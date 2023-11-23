@@ -34,11 +34,7 @@ Full requirements for all experiments are specified in requirements.txt. Install
 ```bash
 grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
 ```
-Currently, T5 text-to-text installation might install tf2.8.0+, downgrade TF related packages with:
-```bash
-pip install tensorflow==2.6.0 tensorflow-estimator==2.6.0 tensorflow-text==2.6.0 tensorflow-io-gcs-filesystem==0.21.0 keras==2.6.0
-```
-> todo: reorder reqs in requirements.txt.
+> note: installation order is such that t5 package will be installed last
 
 ###  Install Horovod
 Depending on your setup just `pip install horovod==0.24.2` might work.

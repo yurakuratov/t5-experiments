@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 import t5  # noqa: F401 core_dump without t5 import here 🤦‍♂️
-from t5.seqio.dataset_providers import ShardInfo
+from seqio.dataset_providers import ShardInfo
 import horovod.torch as hvd
 from dotenv import load_dotenv
 import tensorflow.compat.v1 as tf
