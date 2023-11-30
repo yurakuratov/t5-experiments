@@ -16,38 +16,58 @@ There are two main parts in the repository:
 - training scripts (like bert/t5 pretraining) that use `lm_experiments_tools`
 
 ### Install only lm_experiments_tools
-`lm_experiments_tools` include Trainer with multi-gpu/node with Horovod and APEX torch.cuda.amp FP16 for models
-compatible with HF interface. Most of the scripts in the repo use Trainer from `lm_experiments_tools`.
+`lm_experiments_tools` include Trainers with multi-gpu/node support:
+- Trainer with Horovod (distributed training engine) and APEX torch.cuda.amp FP16 for models.
+- TrainerAccelerate with Accelerate. Accelerate provides features from PyTorch distributed and DeepSpeed.
 
-> note: install torch and horovod according to your setup before `lm_experiments_tools` installation.
+To train models with `lm_experiments_tools` trainers, models should be compatible with HF interface (e.g., return loss
+if labels are passed).
+Most of the scripts in the repo use Trainer from `lm_experiments_tools`.
 
-```bash
-pip install -e .
-```
-This command will install `lm_experiments_tools` with only required packages for Trainer and tools.
+> note: install torch and optionally horovod, accelerate and deepspeed according to your setup before `lm_experiments_tools` installation.
 
-`lm_experiments_tools` Trainer supports gradient accumulation, logging to tensorboard, saving the best models
-based on metrics, custom metrics and data transformations support.
-
-### Install requirements for all experiments
-Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
-```bash
-grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
-```
-> note: installation order is such that t5 package will be installed last
-
-###  Install Horovod
-Depending on your setup just `pip install horovod==0.24.2` might work.
+#### Trainer with Horovod:
+Depending on your setup just `pip install horovod` might work.
 
 Building Horovod with NCCL for PyTorch:
 ```bash
-HOROVOD_NCCL_HOME=... HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_WITH_PYTORCH=1 pip install --no-cache-dir horovod[pytorch]==0.24.2 --no-binary=horovod
+HOROVOD_NCCL_HOME=path/to/nccl HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_WITH_PYTORCH=1 pip install --no-cache-dir horovod[pytorch] --no-binary=horovod
 ```
 check installation with
 ```bash
 horovodrun --check-build
 ```
 For further details check Horovod documentation: https://horovod.readthedocs.io/en/stable/install_include.html
+
+You can get NCCL from https://developer.nvidia.com/nccl
+
+#### Trainer with Accelerate:
+requirements:
+```
+python>=3.8
+accelerate==0.24.1
+torch>=1.10.0
+```
+DeepSpeed installation is optional. DeepSpeed versions requirements:
+```
+deepspeed>=0.9.3,<=0.9.5 and any (?) triton version or no triton installed at all
+deepspeed>=0.10.0 with no triton installed or installed triron==2.1.0
+```
+and finally install `lm_experiments_tools`:
+```bash
+pip install -e .
+```
+
+`lm_experiments_tools` Trainer supports gradient accumulation, logging to tensorboard, saving the best models
+based on metrics, custom metrics and data transformations support.
+>todo: customize `setup.py` to automate support of different environment setups: [all, hvd, accelerate]
+
+### Install requirements for all experiments from this repository
+Full requirements for all experiments are specified in requirements.txt. Install requirements after cloning the repo:
+```bash
+grep -v "^#" requirements.txt | xargs -n 1 -L 1 pip install
+```
+> note: installation order is such that t5 package will be installed last
 
 ### Install APEX
 Install APEX https://github.com/NVIDIA/apex#quick-start
@@ -74,7 +94,7 @@ resources (unordered):
  - https://github.com/horovod/horovod/issues/1089
  - https://github.com/NVIDIA/apex/issues/818
 
-### Install DeepSpeed
+### Install DeepSpeed for Sparse Ops
 DeepSpeed Sparse attention supports only GPUs with compute compatibility >= 7 (V100, T4, A100), CUDA 10.1, 10.2, 11.0, or 11.1 and runs only in FP16 mode (as of DeepSpeed 0.6.0).
 
 PyTorch>=1.7.1,<=1.10.1 wheels with CUDA 10.2/11.0/11.1 from [pytorch.org](https://pytorch.org/get-started/previous-versions/) can be used.
