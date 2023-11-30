@@ -15,6 +15,12 @@ import torch
 import transformers
 
 import lm_experiments_tools.optimizers
+from lm_experiments_tools import HVD_INSTALLED, ACCELERATE_INSTALLED
+
+if HVD_INSTALLED:
+    import horovod.torch as hvd
+if ACCELERATE_INSTALLED:
+    import accelerate
 
 
 def get_cls_by_name(name: str) -> type:
@@ -81,31 +87,28 @@ def get_optimizer(name: str):
     return None
 
 
-def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
+def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES'], accelerator=None):
     args_dict = dict(vars(args))
     args_dict['ENV'] = {}
     for env_var in env_vars:
         args_dict['ENV'][env_var] = os.environ.get(env_var, '')
     # hvd
-    try:
-        import horovod.torch as hvd
+    if HVD_INSTALLED:
         args_dict['HVD_INIT'] = hvd.is_initialized()
         if hvd.is_initialized():
             args_dict['HVD_SIZE'] = hvd.size()
-    except ImportError:
-        pass
     # accelerate
-    # todo: collect full accelerate config
-    try:
-        import accelerate
+    if ACCELERATE_INSTALLED:
         args_dict['accelerate'] = {}
         args_dict['accelerate']['initialized'] = accelerate.PartialState().initialized
-        if accelerate.PartialState().initialized:
+        if accelerate.PartialState().distributed_type != accelerate.DistributedType.NO:
             args_dict['accelerate']['num_processes'] = accelerate.PartialState().num_processes
             args_dict['accelerate']['backend'] = accelerate.PartialState().backend
             args_dict['accelerate']['distributed_type'] = accelerate.PartialState().distributed_type
-    except ImportError:
-        pass
+        if accelerator is not None:
+            args_dict['accelerate']['mixed_precision'] = accelerator.state.mixed_precision
+            if accelerator.state.deepspeed_plugin:
+                args_dict['accelerate']['ds_config'] = accelerator.state.deepspeed_plugin.deepspeed_config
 
     args_dict['MACHINE'] = platform.node()
     args_dict['COMMIT'] = get_git_hash_commit()
@@ -113,22 +116,16 @@ def collect_run_configuration(args, env_vars=['CUDA_VISIBLE_DEVICES']):
 
 
 def get_distributed_rank() -> int:
-    try:
-        import accelerate
-        if accelerate.PartialState().initialized:
+    if ACCELERATE_INSTALLED:
+        if accelerate.PartialState().use_distributed:
             return accelerate.PartialState().process_index
-    except ImportError:
-        pass
 
     if torch.distributed.is_initialized():
         return torch.distributed.get_rank()
 
-    try:
-        import horovod.torch as hvd
+    if HVD_INSTALLED:
         if hvd.is_initialized():
             return hvd.rank()
-    except ImportError:
-        pass
 
     return 0
 
@@ -143,26 +140,20 @@ def rank_0(fn):
 
 
 def wait_for_everyone():
-    try:
-        import accelerate
+    if ACCELERATE_INSTALLED:
         if accelerate.PartialState().initialized:
             accelerate.PartialState().wait_for_everyone()
-    except ImportError:
-        pass
 
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
-    try:
-        import horovod.torch as hvd
+    if HVD_INSTALLED:
         if hvd.is_initialized():
             hvd.barrier()
-    except ImportError:
-        pass
 
 
 def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                add_file_logging=True):
+                add_file_logging=True, accelerator=None):
     """creates experiment directory, saves configuration and git diff, setups logging
 
     Args:
@@ -178,7 +169,7 @@ def prepare_run(args, logger=None, logger_fmt: str = '%(asctime)s - %(name)s - %
         model_path = Path(args.model_path)
         if not model_path.exists():
             Path(model_path).mkdir(parents=True)
-        args_dict = collect_run_configuration(args)
+        args_dict = collect_run_configuration(args, accelerator=accelerator)
         # todo: if model path exists and there is config file, write new config file aside
         json.dump(args_dict, open(model_path / 'config.json', 'w'), indent=4)
         open(model_path / 'git.diff', 'w').write(get_git_diff())

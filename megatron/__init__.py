@@ -25,22 +25,11 @@ from .global_vars import get_adlr_autoresume
 from .global_vars import get_timers
 from .initialize  import initialize_megatron
 
-import horovod.torch as hvd
-
-def print_rank_0(message):
-    """If distributed is initialized, print only on rank 0."""
-    if torch.distributed.is_initialized():
-        if torch.distributed.get_rank() == 0:
-            print(message, flush=True)
-    elif hvd.is_initialized():
-        if hvd.rank() == 0:
-            print(message, flush=True)
-    else:
-        print(message, flush=True)
 
 def is_last_rank():
     return torch.distributed.get_rank() == (
         torch.distributed.get_world_size() - 1)
+
 
 def print_rank_last(message):
     """If distributed is initialized, print only on last rank."""
@@ -52,8 +41,27 @@ def print_rank_last(message):
 
 
 def get_distributed_rank():
+    try:
+        import accelerate
+        if accelerate.PartialState().use_distributed:
+            return accelerate.PartialState().process_index
+    except ImportError:
+        pass
+
     if torch.distributed.is_initialized():
         return torch.distributed.get_rank()
-    if hvd.is_initialized():
-        return hvd.rank()
+
+    try:
+        import horovod.torch as hvd
+        if hvd.is_initialized():
+            return hvd.rank()
+    except ImportError:
+        pass
+
     return 0
+
+
+def print_rank_0(message):
+    """If distributed is initialized, print only on rank 0."""
+    if get_distributed_rank() == 0:
+        print(message, flush=True)

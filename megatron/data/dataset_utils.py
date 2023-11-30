@@ -34,8 +34,6 @@ from megatron import (
 from megatron.data.blendable_dataset import BlendableDataset
 from megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
 
-import horovod.torch as hvd
-
 DSET_TYPE_BERT = 'standard_bert'
 DSET_TYPE_ICT = 'ict'
 DSET_TYPE_T5  = 't5'
@@ -674,11 +672,32 @@ def get_samples_mapping(indexed_dataset,
 
     # Build the indexed mapping if not exist.
     # todo: check if hvd would be used for multigpu
-    is_distributed = torch.distributed.is_initialized() or hvd.is_initialized()
+    is_distributed = torch.distributed.is_initialized()
+    # check that accelerate is used
+    is_accelerate = False
+    is_horovod = False
+    try:
+        import accelerate
+        if accelerate.PartialState().use_distributed:
+            is_distributed = True
+            is_accelerate = True
+    except ImportError:
+        pass
+    # check horovod
+    try:
+        import horovod.torch as hvd
+        if hvd.is_initialized():
+            is_distributed = True
+            is_horovod = True
+    except ImportError:
+        pass
+
     rank = 0
-    if torch.distributed.is_initialized():
+    if is_accelerate:
+        rank = accelerate.PartialState().process_index
+    elif torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
-    elif hvd.is_initialized():
+    elif is_horovod:
         rank = hvd.rank()
 
     if (not is_distributed or rank == 0) and \
@@ -716,7 +735,9 @@ def get_samples_mapping(indexed_dataset,
                      '(seconds): {:4f}'.format(
                          time.time() - start_time))
 
-    if torch.distributed.is_initialized():
+    if is_accelerate:
+        accelerate.PartialState().wait_for_everyone()
+    elif torch.distributed.is_initialized():
         # This should be a barrier but nccl barrier assumes
         # device_index=rank which is not the case for model
         # parallel case
@@ -726,8 +747,7 @@ def get_samples_mapping(indexed_dataset,
         assert counts[0].item() == (
             torch.distributed.get_world_size() //
             torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group()))
-
-    if hvd.is_initialized():
+    elif is_horovod:
         # model parallel is not supported here!
         hvd.barrier()
 
