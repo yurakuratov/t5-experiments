@@ -229,7 +229,10 @@ class TrainerAccelerate:
                 args.num_training_steps = args.iters
             self.lr_scheduler = get_scheduler(args.lr_scheduler, self.optimizer,
                                               args.num_warmup_steps, args.num_training_steps)
-            # todo: do we need to prepare scheduler with accelerate?
+            # prepare should (?) help to handle skipped optimizer steps and skip them for lr_scheduler as well
+            # may fail for megatron lm ?
+            self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
+            # register after prepare might be redundant
             self.accelerator.register_for_checkpointing(self.lr_scheduler)
         else:
             self.lr_scheduler = None
@@ -374,6 +377,9 @@ class TrainerAccelerate:
 
     def _get_gradients_global_norm(self):
         # get gradients global norm (in the same way as in torch.nn.utils.clip_grad_norm_)
+        # uncale gradients for amp fp16 case
+        if self.accelerator.sync_gradients:
+            self.accelerator.unscale_gradients(self.optimizer)
         params = self.model.parameters()
         params = [p for p in params if p.grad is not None]
         if len(params) == 0:
@@ -687,7 +693,8 @@ class TrainerAccelerate:
         else:
             logger.info(f'Loading model from {load_path}')
             checkpoint = torch.load(load_path, map_location='cpu')
-            missing_k, unexpected_k = self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint, strict=False)
+            missing_k, unexpected_k = self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint,
+                                                                                                strict=False)
             if len(missing_k) != 0:
                 logger.info(f'{missing_k} were not loaded from checkpoint! These parameters were randomly initialized.')
             if len(unexpected_k) != 0:
@@ -703,7 +710,11 @@ class TrainerAccelerate:
                 save_path = f'{save_path}/model_{suffix}'
 
             self.accelerator.save_state(f'{save_path}/accelerate_state')
-            self.accelerator.save_model(self.model, f'{save_path}')
+            # do not save full model params if deepspeed zero 3 stage is used
+            # check https://huggingface.co/docs/accelerate/usage_guides/deepspeed#saving-and-loading
+            ds_plugin = self.accelerator.state.deepspeed_plugin
+            if not (ds_plugin and ds_plugin.zero_stage == 3):
+                self.accelerator.save_model(self.model, f'{save_path}')
             self.save_metrics(save_path)
 
             if self.accelerator.is_main_process:
