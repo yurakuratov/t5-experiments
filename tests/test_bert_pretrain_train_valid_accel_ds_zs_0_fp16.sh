@@ -3,9 +3,9 @@
 set -e
 cd ..
 
-MODEL_PATH=./tests/runs/./tests/runs/test_bert_pretrain_hvd
+MODEL_PATH=./tests/runs/test_bert_pretrain_accel_ds_zero_0_fp16
 
-horovodrun --gloo -np $NP python run_bert_pretraining.py \
+accelerate launch --num_processes $NP --mixed_precision fp16 --use_deepspeed --zero_stage 0 --config_file ./tests/accelerate.yaml run_bert_pretraining_accel.py \
 --data_path ./data/toy_wiki/train_text_sentence --valid_data_path ./data/toy_wiki/valid_text_sentence \
 --tokenizer ./vocabs/bert-base-uncased/ --model_cfg ./models_configs/bert_configs/bert_base_uncased-4L.json \
 --model_path $MODEL_PATH \
