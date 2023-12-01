@@ -195,6 +195,19 @@ class TrainerAccelerate:
         self.per_worker_batch_size = self.args.batch_size * self.args.gradient_accumulation_steps
         self.global_batch_size = self.per_worker_batch_size * self.accelerator.num_processes
 
+        # check that deepspeed params in ds_config are set correctly
+        # todo: set this params from trainer args?
+        if self.accelerator.state.distributed_type == accelerate.DistributedType.DEEPSPEED:
+            ds_config = self.accelerator.state.deepspeed_plugin.deepspeed_config
+            if ds_config['gradient_accumulation_steps'] != self.args.gradient_accumulation_steps:
+                raise RuntimeError(f"gradient_accumulation_steps in DeepSpeed config and Trainer args are different: "
+                                   f"DeepSpeed: {ds_config['gradient_accumulation_steps']}, "
+                                   f"Trainer: {self.args.gradient_accumulation_steps}")
+            if ds_config['train_micro_batch_size_per_gpu'] != self.args.batch_size:
+                raise RuntimeError(f"train_micro_batch_size_per_gpu in DeepSpeed config and Trainer batch_size are "
+                                   f"different: DeepSpeed: {ds_config['train_micro_batch_size_per_gpu']}, "
+                                   f"Trainer batch_size: {self.args.batch_size}")
+
         self.model_forward_args = set(get_fn_param_names(self.accelerator.unwrap_model(self.model).forward))
 
         if self.args.clip_grad_norm is not None and self.args.clip_grad_value is not None:
