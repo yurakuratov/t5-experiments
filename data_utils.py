@@ -1,12 +1,13 @@
 import random
 from typing import Callable, List, Optional
 
+import seqio
 import t5
 import torch
 import tensorflow.compat.v1 as tf
 import tensorflow_io as tfio
 from t5.models.hf_model import tokens_to_batches
-from t5.seqio.dataset_providers import ShardInfo
+from seqio.dataset_providers import ShardInfo
 from torch.utils.data import IterableDataset
 
 
@@ -36,19 +37,19 @@ DEFAULT_EXTRA_IDS = 100
 
 
 def get_vocabulary(vocab_path=DEFAULT_SPM_PATH):
-    return t5.seqio.SentencePieceVocabulary(vocab_path, DEFAULT_EXTRA_IDS)
+    return seqio.SentencePieceVocabulary(vocab_path, DEFAULT_EXTRA_IDS)
 
 
 def get_output_features(vocab_path=DEFAULT_SPM_PATH):
     return {
-            "inputs": t5.seqio.Feature(vocabulary=get_vocabulary(vocab_path), add_eos=True, required=False),
-            "targets": t5.seqio.Feature(vocabulary=get_vocabulary(vocab_path), add_eos=True)
+            "inputs": seqio.Feature(vocabulary=get_vocabulary(vocab_path), add_eos=True, required=False),
+            "targets": seqio.Feature(vocabulary=get_vocabulary(vocab_path), add_eos=True)
            }
 
 
 DEFAULT_OUTPUT_FEATURES = {
-        "inputs": t5.seqio.Feature(vocabulary=get_vocabulary(), add_eos=True, required=False),
-        "targets": t5.seqio.Feature(vocabulary=get_vocabulary(), add_eos=True)
+        "inputs": seqio.Feature(vocabulary=get_vocabulary(), add_eos=True, required=False),
+        "targets": seqio.Feature(vocabulary=get_vocabulary(), add_eos=True)
     }
 
 
